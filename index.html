@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>S.A.M. Control Interface</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="app-title-group">
+        <h1>S.A.M. Control Interface</h1>
+      </div>
+
+      <section class="connection-panel connection-corner" aria-label="Connection status">
+        <button id="ros-menu-btn" class="menu-btn" type="button" aria-expanded="false" aria-label="Connection details menu">
+          &#9776;
+        </button>
+        <div class="status-group" aria-live="polite">
+          <span class="status-label">Terminal:</span>
+          <span
+            id="terminal-connection-status"
+            class="status-indicator status-disconnected"
+          >
+            Disconnected
+          </span>
+          <span class="status-separator">|</span>
+          <span class="status-label">ROS:</span>
+          <span
+            id="connection-status"
+            class="status-indicator status-disconnected"
+          >
+            Disconnected
+          </span>
+          <button
+            id="launch-ros-bridge-btn"
+            class="launch-ros-btn"
+            type="button"
+            title="Launch rosbridge on Jetson"
+          >
+            Launch
+          </button>
+        </div>
+        <div id="ros-meta-panel" class="ros-meta-panel" hidden>
+          <span class="ros-endpoint-label">ROS bridge</span>
+          <span id="ros-endpoint-value">ws://10.12.64.222:9090</span>
+        </div>
+      </section>
+    </header>
+
+    <main class="layout" aria-label="Sam control interface">
+      <section id="mode-panel" class="quick-panel mode-panel" aria-label="Mode selection" hidden>
+        <div class="panel-drag-handle" data-drag-panel="mode-panel"><h2>Mode</h2></div>
+        <fieldset>
+          <legend class="sr-only">Select mode</legend>
+          <div class="mode-options">
+            <label>
+              <input type="radio" name="mode" value="enabled" id="mode-enabled" checked />
+              Enabled
+            </label>
+            <label>
+              <input type="radio" name="mode" value="disabled" id="mode-disabled" />
+              Disabled
+            </label>
+            <label>
+              <input type="radio" name="mode" value="testing" id="mode-testing" />
+              Testing
+            </label>
+          </div>
+        </fieldset>
+        <p class="hint">Use Tab / Shift+Tab to move, Space / Enter to select.</p>
+      </section>
+
+      <section id="commands-panel" class="quick-panel command-panel" aria-label="Command control" hidden>
+        <div class="panel-drag-handle" data-drag-panel="commands-panel"><h2>Commands</h2></div>
+        <form id="cmd-builder" class="cmd-builder" autocomplete="off">
+          <div class="cmd-row">
+            <div class="field-group">
+              <label for="cmd-type">Type</label>
+              <select id="cmd-type">
+                <option value="move">move</option>
+                <option value="servo">servo</option>
+                <option value="enable">enable</option>
+                <option value="query">query</option>
+                <option value="home">home</option>
+                <option value="rate">rate</option>
+                <option value="raw">raw</option>
+                <option value="walk">walk</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <label for="cmd-leg">Leg</label>
+              <select id="cmd-leg">
+                <option value="l0">l0</option>
+                <option value="l1">l1</option>
+                <option value="l2">l2</option>
+                <option value="l3">l3</option>
+              </select>
+            </div>
+          </div>
+
+          <div id="cmd-fields" class="cmd-fields"></div>
+
+          <div class="command-actions">
+            <button id="cmd-send-btn" type="submit">Send</button>
+            <button id="cmd-save-btn" type="button">Save</button>
+          </div>
+        </form>
+        <div id="cmd-saved" class="cmd-saved"></div>
+      </section>
+
+      <section id="device-panel" class="quick-panel device-panel" aria-label="Connected devices" hidden>
+        <div class="device-panel-header panel-drag-handle" data-drag-panel="device-panel">
+          <h2>Hotspot Devices</h2>
+          <div class="device-panel-actions">
+            <span id="device-count" class="hint">—</span>
+            <button id="refresh-devices-btn" type="button">Refresh</button>
+            <label class="device-auto-refresh-label">
+              <input id="auto-refresh-devices" type="checkbox" checked />
+              Auto (5s)
+            </label>
+          </div>
+        </div>
+        <div id="devices-content">
+          <div class="hint">Auto-discovers all clients on the Jetson's hotspot.</div>
+          <table class="device-table" aria-label="Connected device status table">
+            <thead>
+              <tr>
+                <th scope="col">Hostname</th>
+                <th scope="col">IP</th>
+                <th scope="col">Status</th>
+              </tr>
+            </thead>
+            <tbody id="device-status-body">
+              <tr><td colspan="3" class="hint" style="text-align:center;padding:16px 0;">Scanning...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="terminal-panel" class="quick-panel" hidden>
+        <div id="terminal-drag-handle" class="panel-drag-handle" aria-label="Drag console panel">
+          <h2>Jetson Terminal</h2>
+          <div class="terminal-header-actions">
+            <button
+              id="terminal-settings-toggle-btn"
+              class="settings-cog-btn"
+              type="button"
+              aria-expanded="false"
+              aria-label="Toggle terminal settings"
+              title="Terminal settings"
+            >
+              &#9881;
+            </button>
+          </div>
+        </div>
+        <div id="terminal-settings" class="terminal-settings" aria-label="Jetson terminal settings">
+          <div class="field-group">
+            <label for="terminal-gateway-url">Gateway</label>
+            <input id="terminal-gateway-url" type="text" value="ws://localhost:8787" autocomplete="off" />
+          </div>
+          <div class="field-group">
+            <label for="terminal-host">Host</label>
+            <select id="terminal-host" name="terminal-host">
+              <option value="10.12.64.222" selected>10.12.64.222</option>
+              <option value="10.42.0.1">10.42.0.1</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label for="terminal-port">Port</label>
+            <input id="terminal-port" type="text" value="22" autocomplete="off" />
+          </div>
+          <div class="field-group">
+            <label for="terminal-user">User</label>
+            <input id="terminal-user" type="text" value="sam" autocomplete="off" />
+          </div>
+          <div class="field-group">
+            <label for="terminal-password">Password</label>
+            <input id="terminal-password" type="password" autocomplete="current-password" />
+          </div>
+        </div>
+
+        <div id="terminal-window" class="terminal-window">
+          <div
+            id="terminal-output"
+            class="terminal-output"
+            tabindex="0"
+            aria-live="polite"
+            aria-label="Jetson terminal output"
+          ></div>
+          <div id="terminal-ctrl-hint" class="terminal-ctrl-hint" hidden>Ctrl+C to stop</div>
+          <form id="terminal-shell-form" class="terminal-inline-form">
+            <label class="sr-only" for="terminal-command">Terminal command line</label>
+            <span id="terminal-prompt" class="terminal-prompt">sam@jetson:~$</span>
+            <input
+              id="terminal-command"
+              class="terminal-command-input"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </form>
+        </div>
+      </section>
+
+      <section class="testing-panel quick-panel" id="testing-panel" aria-label="Testing controls" hidden>
+        <div class="panel-drag-handle" data-drag-panel="testing-panel">
+          <h2>Testing</h2>
+        </div>
+        <p class="hint">Set target velocity and press Enter to send.</p>
+
+        <div class="stepper-grid" id="stepper-grid">
+          <!-- Rows injected by app.js -->
+        </div>
+
+        <div class="testing-actions">
+          <button id="reset-testing-btn" type="button">Reset All</button>
+        </div>
+      </section>
+
+      <section class="log-panel quick-panel" id="log-panel" aria-label="Event log" hidden>
+        <div class="panel-drag-handle" data-drag-panel="log-panel">
+          <h2>Event Log</h2>
+          <div class="log-filter-actions">
+            <button type="button" class="log-filter-btn active" data-log-filter="all">All</button>
+            <button type="button" class="log-filter-btn" data-log-filter="error">Errors</button>
+            <button type="button" class="log-filter-btn" data-log-filter="ros">ROS</button>
+            <button type="button" class="log-filter-btn" data-log-filter="send">Sent</button>
+          </div>
+        </div>
+        <div
+          id="log-output"
+          class="log-output"
+          tabindex="0"
+          aria-live="polite"
+          aria-label="Command and connection log"
+        ></div>
+      </section>
+
+      <aside class="panel-launcher" aria-label="Panel launcher">
+        <button type="button" data-panel-target="mode-panel">Mode</button>
+        <button type="button" data-panel-target="commands-panel">Commands</button>
+        <button type="button" data-panel-target="device-panel">Devices</button>
+        <button type="button" data-panel-target="terminal-panel">Console</button>
+        <button type="button" data-panel-target="testing-panel">Testing</button>
+        <button type="button" data-panel-target="log-panel">Log</button>
+      </aside>
+    </main>
+  </body>
+</html>

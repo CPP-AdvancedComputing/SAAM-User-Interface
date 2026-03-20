@@ -1,0 +1,22 @@
+{
+  "name": "sam-user-interface",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "terminal": "node terminal-server.cjs",
+    "dev:all": "concurrently -k \"npm run terminal\" \"npm run dev\""
+  },
+  "dependencies": {
+    "roslib": "^2.1.0",
+    "ssh2": "^1.17.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "vite": "^7.1.0"
+  }
+}
