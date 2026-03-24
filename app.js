@@ -10,13 +10,24 @@ const CONFIG = {
     commandTopic: "/sam/command",
     testingTopic: "/sam/testing_state",
     webCommandTopic: "/web/command",
+    globalPoseSequenceTopic: "/planner/global_pose_sequence",
+    legCommandTopic: "/planner/leg_command",
     commandMessageType: "std_msgs/msg/String",
     testingMessageType: "std_msgs/msg/String",
+    legCommandMessageType: "sam_interfaces/msg/LegCommand",
+    imuDataTopic: "/imu/data",
+    imuMessageType: "sensor_msgs/Imu",
+    legEnabledStateMessageType: "std_msgs/msg/Bool",
+    jetsonCpuTempTopic: "/jetson/cpu_temp",
+    jetsonCpuLoadTopic: "/jetson/cpu_load_percent",
+    float32MessageType: "std_msgs/msg/Float32",
+    plannerStatusTopic: "/planner/status",
   },
   terminal: {
     gatewayUrl: "ws://localhost:8787",
   },
   legs: ["l0", "l1", "l2", "l3"],
+  imuPerLeg: 2,
   joints: ["inner_stepper", "outer_stepper", "hip", "yaw", "pitch", "roll"],
 };
 const DEFAULT_TERMINAL_PASSWORD = import.meta.env.VITE_TERMINAL_PASSWORD || "";
@@ -25,6 +36,19 @@ let ros = null;
 let commandTopic = null;
 let testingTopic = null;
 let webCommandTopic = null;
+let poseSequenceTopic = null;
+let legCommandTopic = null;
+let trajectoryLegCommandRaf = null;
+const trajectoryLegPending = new Map();
+let imuDataRosTopic = null;
+let imuDisplayRaf = null;
+const imuPending = new Map();
+/** Latest enable flag per leg from `/{lN}/enabled_state` only (not from clicks). */
+const legEnableStates = {};
+const legEnableRosTopics = [];
+let jetsonCpuTempTopic = null;
+let jetsonCpuLoadTopic = null;
+let plannerStatusRosTopic = null;
 let isConnected = false;
 let rosReconnectTimer = null;
 let serviceSocket = null;
@@ -146,7 +170,102 @@ function setTerminalStatus(status, kind = "disconnected") {
   }
 }
 
+function teardownTrajectoryTopics() {
+  if (poseSequenceTopic) {
+    try {
+      poseSequenceTopic.unsubscribe();
+    } catch (_e) {
+      // ignore
+    }
+    poseSequenceTopic = null;
+  }
+  if (legCommandTopic) {
+    try {
+      legCommandTopic.unsubscribe();
+    } catch (_e) {
+      // ignore
+    }
+    legCommandTopic = null;
+  }
+  if (trajectoryLegCommandRaf != null) {
+    cancelAnimationFrame(trajectoryLegCommandRaf);
+    trajectoryLegCommandRaf = null;
+  }
+  trajectoryLegPending.clear();
+}
+
+function teardownLegEnableTopics() {
+  for (const topic of legEnableRosTopics) {
+    try {
+      topic.unsubscribe();
+    } catch (_e) {
+      // ignore
+    }
+  }
+  legEnableRosTopics.length = 0;
+  for (const id of Object.keys(legEnableStates)) {
+    delete legEnableStates[id];
+  }
+  for (const { id } of LEGS) {
+    const el = document.querySelector(`[data-leg-enable-display="${id}"]`);
+    if (el) el.textContent = "\u2014";
+  }
+}
+
+function teardownImuTopics() {
+  if (imuDataRosTopic) {
+    try {
+      imuDataRosTopic.unsubscribe();
+    } catch (_e) {
+      // ignore
+    }
+    imuDataRosTopic = null;
+  }
+  if (imuDisplayRaf != null) {
+    cancelAnimationFrame(imuDisplayRaf);
+    imuDisplayRaf = null;
+  }
+  imuPending.clear();
+}
+
+function teardownJetsonLoadTopics() {
+  if (jetsonCpuTempTopic) {
+    try {
+      jetsonCpuTempTopic.unsubscribe();
+    } catch (_e) {
+      // ignore
+    }
+    jetsonCpuTempTopic = null;
+  }
+  if (jetsonCpuLoadTopic) {
+    try {
+      jetsonCpuLoadTopic.unsubscribe();
+    } catch (_e) {
+      // ignore
+    }
+    jetsonCpuLoadTopic = null;
+  }
+  resetJetsonLoadDisplays();
+}
+
+function teardownPlannerStatusTopics() {
+  if (plannerStatusRosTopic) {
+    try {
+      plannerStatusRosTopic.unsubscribe();
+    } catch (_e) {
+      // ignore
+    }
+    plannerStatusRosTopic = null;
+  }
+  resetPlannerStatusDisplay();
+}
+
 function cleanupRosState() {
+  teardownTrajectoryTopics();
+  teardownImuTopics();
+  teardownLegEnableTopics();
+  teardownJetsonLoadTopics();
+  teardownPlannerStatusTopics();
   isConnected = false;
   commandTopic = null;
   testingTopic = null;
@@ -269,43 +388,379 @@ function initTopics() {
     webCommandTopic: { name: webCommandTopic.name, messageType: webCommandTopic.messageType },
   });
   logLine("ROS", `Topics initialized — /web/command as ${CONFIG.ros.commandMessageType}`, "ros");
+  initTrajectoryTopics();
+  initGyroTopics();
+  initLegEnableTopics();
+  initJetsonLoadTopics();
+  initPlannerStatusTopics();
 }
 
-
-function getCurrentMode() {
-  const radios = document.querySelectorAll('input[name="mode"]');
-  for (const r of radios) {
-    if (r.checked) return r.value;
+function resetPlannerStatusDisplay() {
+  const stateEl = $("planner-state");
+  const goalEl = $("planner-goal");
+  const progressEl = $("planner-progress");
+  const progressBar = $("planner-progress-bar");
+  if (stateEl) {
+    stateEl.textContent = "\u2014";
+    stateEl.className = "planner-state-idle";
   }
-  return "enabled";
+  if (goalEl) goalEl.textContent = "\u2014";
+  if (progressEl) progressEl.textContent = "\u2014";
+  if (progressBar) progressBar.style.width = "0%";
 }
 
-function setupModeToggle() {
-  const radios = document.querySelectorAll('input[name="mode"]');
+function updatePlannerStatusDisplay(status) {
+  if (!status || typeof status !== "object") return;
 
-  radios.forEach((r) => {
-    r.addEventListener("change", () => {
-      const mode = getCurrentMode();
-      logLine("MODE", "Changed mode to " + mode);
-      sendModeChange(mode);
+  const stateRaw = status.state;
+  const stateKey =
+    typeof stateRaw === "string" && stateRaw.length > 0 ? stateRaw.toLowerCase() : "unknown";
+
+  const stateEl = $("planner-state");
+  if (stateEl) {
+    stateEl.textContent = stateKey.toUpperCase();
+    stateEl.className = "planner-state-" + stateKey;
+  }
+
+  const goalEl = $("planner-goal");
+  if (goalEl) {
+    const g = status.goal;
+    if (g && g.type != null && g.count != null) {
+      goalEl.textContent = `${g.type} x${g.count}`;
+    } else {
+      goalEl.textContent = "\u2014";
+    }
+  }
+
+  const pctRaw = status.progress_percent;
+  const nPoses = status.total_poses;
+  const pctNum =
+    typeof pctRaw === "number" && Number.isFinite(pctRaw)
+      ? pctRaw
+      : Number.parseFloat(pctRaw);
+  const pct = Number.isFinite(pctNum) ? pctNum : 0;
+  const posesNum =
+    typeof nPoses === "number" && Number.isFinite(nPoses)
+      ? nPoses
+      : Number.parseInt(String(nPoses ?? ""), 10);
+  const poses = Number.isFinite(posesNum) ? posesNum : 0;
+
+  const progressEl = $("planner-progress");
+  if (progressEl) {
+    progressEl.textContent = `${pct}% (${poses} poses)`;
+  }
+
+  const progressBar = $("planner-progress-bar");
+  if (progressBar) {
+    const w = Math.min(100, Math.max(0, pct));
+    progressBar.style.width = `${w}%`;
+  }
+}
+
+function initPlannerStatusTopics() {
+  if (!ros) return;
+  teardownPlannerStatusTopics();
+
+  plannerStatusRosTopic = new ROSLIB.Topic({
+    ros,
+    name: CONFIG.ros.plannerStatusTopic,
+    messageType: CONFIG.ros.commandMessageType,
+  });
+
+  plannerStatusRosTopic.subscribe((message) => {
+    try {
+      const raw = message?.data;
+      if (raw == null || String(raw).trim() === "") return;
+      const plannerStatus = JSON.parse(raw);
+      updatePlannerStatusDisplay(plannerStatus);
+
+      const prog = plannerStatus.progress_percent;
+      console.log("Progress:", `${prog ?? 0}%`);
+      console.log("Planner Status:", {
+        state: plannerStatus.state,
+        goal: plannerStatus.goal,
+        total_poses: plannerStatus.total_poses,
+        progress: `${prog ?? 0}%`,
+      });
+      if (plannerStatus.state === "idle") {
+        console.log("Movement complete!");
+      }
+    } catch (e) {
+      console.error("Failed to parse planner status:", e);
+    }
+  });
+
+  console.log("[ros] Planner status:", CONFIG.ros.plannerStatusTopic);
+}
+
+/** Per-leg ROS topic: `/l0/enabled_state`, `/l1/enabled_state`, … from CONFIG.legs */
+function legEnabledStateTopicPathForIndex(index) {
+  const legKey = CONFIG.legs[index];
+  return legKey ? `/${legKey}/enabled_state` : "";
+}
+
+function updateLegStatusDisplay(legId, value) {
+  const el = document.querySelector(`[data-leg-enable-display="${legId}"]`);
+  if (!el) return;
+  el.textContent = String(value);
+}
+
+function initLegEnableTopics() {
+  if (!ros) return;
+  teardownLegEnableTopics();
+
+  LEGS.forEach((legDef, index) => {
+    const topicName = legEnabledStateTopicPathForIndex(index);
+    if (!topicName) return;
+
+    const displayId = legDef.id;
+    const topic = new ROSLIB.Topic({
+      ros,
+      name: topicName,
+      messageType: CONFIG.ros.legEnabledStateMessageType,
     });
+    legEnableRosTopics.push(topic);
+    topic.subscribe((message) => {
+      const value = message?.data;
+      if (typeof value !== "boolean") return;
+      legEnableStates[displayId] = value;
+      updateLegStatusDisplay(displayId, value);
+    });
+  });
+
+  console.log(
+    "[ros] Leg enable state topics (per leg):",
+    LEGS.map((_leg, i) => legEnabledStateTopicPathForIndex(i)).filter(Boolean)
+  );
+}
+
+function sendLegEnableToggleCommand(legId) {
+  const current = legEnableStates[legId];
+  const next = current === true ? false : true;
+  const payload = { leg_id: legId, type: "enable", value: next };
+  publishPayload(JSON.stringify(payload));
+}
+
+function resetJetsonLoadDisplays() {
+  const tempEl = $("cpu-temp-display");
+  const loadEl = $("cpu-load-display");
+  if (tempEl) {
+    tempEl.textContent = "\u2014";
+    tempEl.className = "jetson-metric-value temp-normal";
+  }
+  if (loadEl) {
+    loadEl.textContent = "\u2014";
+    loadEl.className = "jetson-metric-value load-idle";
+  }
+}
+
+function updateCpuTempDisplay(tempStr, numericTemp) {
+  const element = $("cpu-temp-display");
+  if (!element) return;
+  element.textContent = `${tempStr}\u00b0C`;
+  element.className =
+    numericTemp > 70 ? "jetson-metric-value temp-warning" : "jetson-metric-value temp-normal";
+}
+
+function updateCpuLoadDisplay(loadStr, numericLoad) {
+  const element = $("cpu-load-display");
+  if (!element) return;
+  element.textContent = `${loadStr}%`;
+  let band = "load-high";
+  if (numericLoad < 50) band = "load-low";
+  else if (numericLoad < 75) band = "load-medium";
+  element.className = `jetson-metric-value ${band}`;
+}
+
+function initJetsonLoadTopics() {
+  if (!ros) return;
+  teardownJetsonLoadTopics();
+
+  jetsonCpuTempTopic = new ROSLIB.Topic({
+    ros,
+    name: CONFIG.ros.jetsonCpuTempTopic,
+    messageType: CONFIG.ros.float32MessageType,
+  });
+  jetsonCpuTempTopic.subscribe((message) => {
+    const raw = message?.data;
+    const n = typeof raw === "number" ? raw : Number.parseFloat(raw);
+    if (!Number.isFinite(n)) return;
+    const valueStr = n.toFixed(1);
+    console.log("CPU Temp:", `${valueStr}\u00b0C`);
+    updateCpuTempDisplay(valueStr, n);
+  });
+
+  jetsonCpuLoadTopic = new ROSLIB.Topic({
+    ros,
+    name: CONFIG.ros.jetsonCpuLoadTopic,
+    messageType: CONFIG.ros.float32MessageType,
+  });
+  jetsonCpuLoadTopic.subscribe((message) => {
+    const raw = message?.data;
+    const n = typeof raw === "number" ? raw : Number.parseFloat(raw);
+    if (!Number.isFinite(n)) return;
+    const valueStr = n.toFixed(1);
+    console.log("CPU Load:", `${valueStr}%`);
+    updateCpuLoadDisplay(valueStr, n);
+  });
+
+  console.log("[ros] Jetson load topics:", {
+    cpuTemp: CONFIG.ros.jetsonCpuTempTopic,
+    cpuLoad: CONFIG.ros.jetsonCpuLoadTopic,
   });
 }
 
-function sendModeChange(mode) {
-  if (!commandTopic || !isConnected) {
-    logLine("SEND", "Cannot send mode change, not connected", "error");
-    return;
+function normalizePlannerLegIndex(message) {
+  const raw = message?.leg_id ?? message?.legId;
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string") {
+    const m = raw.match(/(\d+)/);
+    if (m) return Number.parseInt(m[1], 10);
   }
-
-  const payload = {
-    type: "mode_change",
-    mode,
-  };
-
-  commandTopic.publish({ data: JSON.stringify(payload) });
-  logLine("SEND", "Mode change sent: " + JSON.stringify(payload), "send");
+  return NaN;
 }
+
+function flushTrajectoryLegDisplays() {
+  trajectoryLegCommandRaf = null;
+  trajectoryLegPending.forEach((msg, legIndex) => {
+    const legKey = CONFIG.legs[legIndex];
+    if (!legKey) return;
+    const pre = document.querySelector(`[data-trajectory-leg="${legKey}"]`);
+    if (pre) {
+      try {
+        pre.textContent = JSON.stringify(msg, null, 2);
+      } catch (_e) {
+        pre.textContent = String(msg);
+      }
+    }
+  });
+  trajectoryLegPending.clear();
+}
+
+function initTrajectoryTopics() {
+  if (!ros) return;
+  teardownTrajectoryTopics();
+
+  poseSequenceTopic = new ROSLIB.Topic({
+    ros,
+    name: CONFIG.ros.globalPoseSequenceTopic,
+    messageType: CONFIG.ros.commandMessageType,
+  });
+
+  poseSequenceTopic.subscribe((message) => {
+    const el = $("trajectory-pose-sequence");
+    if (!el) return;
+    const raw = message?.data ?? "";
+    try {
+      const data = JSON.parse(raw);
+      el.textContent = JSON.stringify(data, null, 2);
+      console.log("Trajectory:", data);
+    } catch (_e) {
+      el.textContent = raw;
+    }
+  });
+
+  legCommandTopic = new ROSLIB.Topic({
+    ros,
+    name: CONFIG.ros.legCommandTopic,
+    messageType: CONFIG.ros.legCommandMessageType,
+  });
+
+  legCommandTopic.subscribe((message) => {
+    const legIndex = normalizePlannerLegIndex(message);
+    if (!Number.isFinite(legIndex) || legIndex < 0 || legIndex >= CONFIG.legs.length) {
+      return;
+    }
+    trajectoryLegPending.set(legIndex, message);
+    if (trajectoryLegCommandRaf != null) return;
+    trajectoryLegCommandRaf = requestAnimationFrame(flushTrajectoryLegDisplays);
+  });
+
+  console.log("[ros] Trajectory topics:", {
+    globalPoseSequence: CONFIG.ros.globalPoseSequenceTopic,
+    legCommand: CONFIG.ros.legCommandTopic,
+  });
+}
+
+function parseImuRoutingFromFrameId(frameId) {
+  if (!frameId || typeof frameId !== "string") return null;
+  const s = frameId.trim();
+  const legMatch = s.match(/(?:^|[^a-zA-Z0-9])(?:leg[_\s-]?|l)(\d+)/i);
+  const imuMatch = s.match(/imu[_\s-]?(\d+)/i);
+  const leg = legMatch ? Number.parseInt(legMatch[1], 10) : NaN;
+  let imu = imuMatch ? Number.parseInt(imuMatch[1], 10) : NaN;
+  if (!Number.isFinite(leg) || leg < 0 || leg >= CONFIG.legs.length) return null;
+  if (!Number.isFinite(imu)) imu = 0;
+  if (imu < 0 || imu >= CONFIG.imuPerLeg) return null;
+  return { leg, imu };
+}
+
+function formatImuForDisplay(message, note) {
+  const la = message?.linear_acceleration ?? {};
+  const av = message?.angular_velocity ?? {};
+  const payload = {
+    frame_id: message?.header?.frame_id ?? "",
+    accel: {
+      x: la.x,
+      y: la.y,
+      z: la.z,
+    },
+    gyro: {
+      x: av.x,
+      y: av.y,
+      z: av.z,
+    },
+  };
+  if (note) payload._routing_note = note;
+  return JSON.stringify(payload, null, 2);
+}
+
+function flushImuDisplays() {
+  imuDisplayRaf = null;
+  imuPending.forEach((text, key) => {
+    const pre = document.querySelector(`[data-gyro-cell="${key}"]`);
+    if (pre) pre.textContent = text;
+  });
+  imuPending.clear();
+}
+
+function initGyroTopics() {
+  if (!ros) return;
+  teardownImuTopics();
+
+  imuDataRosTopic = new ROSLIB.Topic({
+    ros,
+    name: CONFIG.ros.imuDataTopic,
+    messageType: CONFIG.ros.imuMessageType,
+  });
+
+  imuDataRosTopic.subscribe((message) => {
+    const fid = message?.header?.frame_id ?? "";
+    const routed = parseImuRoutingFromFrameId(fid);
+    let leg = 0;
+    let imu = 0;
+    let note = null;
+    if (routed) {
+      ({ leg, imu } = routed);
+    } else {
+      note =
+        fid === ""
+          ? "No frame_id; showing under l0 · IMU 0. Name frames like l0_imu1."
+          : `Unrecognized frame_id "${fid}"; showing under l0 · IMU 0.`;
+    }
+    const legKey = CONFIG.legs[leg];
+    const cellKey = `${legKey}-${imu}`;
+    imuPending.set(cellKey, formatImuForDisplay(message, note));
+    if (imuDisplayRaf != null) return;
+    imuDisplayRaf = requestAnimationFrame(flushImuDisplays);
+  });
+
+  console.log("[ros] IMU topic:", {
+    name: CONFIG.ros.imuDataTopic,
+    type: CONFIG.ros.imuMessageType,
+  });
+}
+
 
 const CMD_FIELDS = {
   move:   ["inner", "outer", "servo"],
@@ -638,10 +1093,37 @@ function buildStepperGrid() {
     const card = document.createElement("div");
     card.className = "leg-card";
 
-    const heading = document.createElement("div");
-    heading.className = "leg-heading";
-    heading.textContent = label;
-    card.appendChild(heading);
+    const headerRow = document.createElement("div");
+    headerRow.className = "leg-heading-row";
+
+    const title = document.createElement("span");
+    title.className = "leg-heading";
+    title.textContent = label;
+
+    const enableBtn = document.createElement("button");
+    enableBtn.type = "button";
+    enableBtn.className = "leg-enable-status";
+    enableBtn.dataset.legId = id;
+    enableBtn.setAttribute("data-leg-enable-display", id);
+    const idx = LEGS.findIndex((L) => L.id === id);
+    const subscribeTopic = idx >= 0 ? legEnabledStateTopicPathForIndex(idx) : "";
+    if (subscribeTopic) {
+      enableBtn.dataset.rosTopic = subscribeTopic;
+      enableBtn.title = `Listens to ${subscribeTopic}`;
+    }
+    enableBtn.textContent = "\u2014";
+    enableBtn.setAttribute(
+      "aria-label",
+      `${id} enabled state${subscribeTopic ? ` from ${subscribeTopic}` : ""}; click to send enable toggle`
+    );
+    enableBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      sendLegEnableToggleCommand(id);
+    });
+
+    headerRow.appendChild(title);
+    headerRow.appendChild(enableBtn);
+    card.appendChild(headerRow);
 
     if (hasInner) {
       card.appendChild(buildInputRow(id, "inner", "Inside"));
@@ -1489,14 +1971,29 @@ function setupInitialFocus() {
   }
 }
 
+function setupTrajectoryPanel() {
+  const btn = $("trajectory-toggle-pose-sequence-btn");
+  const block = $("trajectory-sequence-block");
+  if (!btn || !block) return;
+
+  btn.addEventListener("click", () => {
+    const opening = block.hidden;
+    block.hidden = !opening;
+    btn.setAttribute("aria-expanded", String(opening));
+    btn.textContent = opening
+      ? "Hide global pose sequence"
+      : "Show global pose sequence";
+  });
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   setupRos();
-  setupModeToggle();
   setupDraggableConsolePanel();
   setupPanelLauncher();
   setupCommandForm();
   setupTestingControls();
   setupTerminalForm();
+  setupTrajectoryPanel();
   setupInitialFocus();
 
   // Make all panels with drag handles draggable

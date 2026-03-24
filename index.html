@@ -67,28 +67,6 @@
     </header>
 
     <main class="layout" aria-label="Sam control interface">
-      <section id="mode-panel" class="quick-panel mode-panel" aria-label="Mode selection" hidden>
-        <div class="panel-drag-handle" data-drag-panel="mode-panel"><h2>Mode</h2></div>
-        <fieldset>
-          <legend class="sr-only">Select mode</legend>
-          <div class="mode-options">
-            <label>
-              <input type="radio" name="mode" value="enabled" id="mode-enabled" checked />
-              Enabled
-            </label>
-            <label>
-              <input type="radio" name="mode" value="disabled" id="mode-disabled" />
-              Disabled
-            </label>
-            <label>
-              <input type="radio" name="mode" value="testing" id="mode-testing" />
-              Testing
-            </label>
-          </div>
-        </fieldset>
-        <p class="hint">Use Tab / Shift+Tab to move, Space / Enter to select.</p>
-      </section>
-
       <section id="commands-panel" class="quick-panel command-panel" aria-label="Command control" hidden>
         <div class="panel-drag-handle" data-drag-panel="commands-panel"><h2>Commands</h2></div>
         <form id="cmd-builder" class="cmd-builder" autocomplete="off">
@@ -223,6 +201,179 @@
         </div>
       </section>
 
+      <section
+        id="trajectory-panel"
+        class="quick-panel trajectory-panel"
+        aria-label="Planner trajectory"
+        hidden
+      >
+        <div class="panel-drag-handle" data-drag-panel="trajectory-panel">
+          <h2>Trajectory</h2>
+        </div>
+        <p class="hint">
+          Leg commands stream live below. Global pose sequence is available on demand.
+        </p>
+        <div class="trajectory-panel-actions">
+          <button
+            type="button"
+            id="trajectory-toggle-pose-sequence-btn"
+            class="trajectory-toggle-seq-btn"
+            aria-expanded="false"
+            aria-controls="trajectory-sequence-block"
+          >
+            Show global pose sequence
+          </button>
+        </div>
+        <div id="trajectory-sequence-block" class="trajectory-sequence-block" hidden>
+          <div class="trajectory-block-label">Global pose sequence</div>
+          <pre id="trajectory-pose-sequence" class="trajectory-pre" tabindex="0">—</pre>
+        </div>
+        <div class="trajectory-leg-grid" role="group" aria-label="Leg command streams">
+          <div class="leg-card trajectory-leg-window">
+            <div class="leg-heading">Leg l0</div>
+            <pre class="trajectory-pre trajectory-leg-pre" data-trajectory-leg="l0" tabindex="0">—</pre>
+          </div>
+          <div class="leg-card trajectory-leg-window">
+            <div class="leg-heading">Leg l1</div>
+            <pre class="trajectory-pre trajectory-leg-pre" data-trajectory-leg="l1" tabindex="0">—</pre>
+          </div>
+          <div class="leg-card trajectory-leg-window">
+            <div class="leg-heading">Leg l2</div>
+            <pre class="trajectory-pre trajectory-leg-pre" data-trajectory-leg="l2" tabindex="0">—</pre>
+          </div>
+          <div class="leg-card trajectory-leg-window">
+            <div class="leg-heading">Leg l3</div>
+            <pre class="trajectory-pre trajectory-leg-pre" data-trajectory-leg="l3" tabindex="0">—</pre>
+          </div>
+        </div>
+      </section>
+
+      <section
+        id="gyro-panel"
+        class="quick-panel gyro-panel"
+        aria-label="IMU gyro and acceleration"
+        hidden
+      >
+        <div class="panel-drag-handle" data-drag-panel="gyro-panel">
+          <h2>Gyro</h2>
+        </div>
+        <p class="hint">
+          <code>/imu/data</code> (<code>sensor_msgs/Imu</code>). Two IMUs per leg (8 cells). Messages are
+          routed by <code>header.frame_id</code> when it contains leg and IMU index (for example
+          <code>l2_imu1</code>); otherwise the sample is shown under leg l0 · IMU 0 with a note.
+        </p>
+        <div class="gyro-leg-stack" role="group" aria-label="IMU streams per leg">
+          <div class="leg-card gyro-leg-block">
+            <div class="leg-heading">Leg l0</div>
+            <div class="gyro-imu-pair">
+              <div class="gyro-imu-cell">
+                <div class="gyro-imu-label">IMU 0</div>
+                <pre class="trajectory-pre gyro-pre" data-gyro-cell="l0-0" tabindex="0">—</pre>
+              </div>
+              <div class="gyro-imu-cell">
+                <div class="gyro-imu-label">IMU 1</div>
+                <pre class="trajectory-pre gyro-pre" data-gyro-cell="l0-1" tabindex="0">—</pre>
+              </div>
+            </div>
+          </div>
+          <div class="leg-card gyro-leg-block">
+            <div class="leg-heading">Leg l1</div>
+            <div class="gyro-imu-pair">
+              <div class="gyro-imu-cell">
+                <div class="gyro-imu-label">IMU 0</div>
+                <pre class="trajectory-pre gyro-pre" data-gyro-cell="l1-0" tabindex="0">—</pre>
+              </div>
+              <div class="gyro-imu-cell">
+                <div class="gyro-imu-label">IMU 1</div>
+                <pre class="trajectory-pre gyro-pre" data-gyro-cell="l1-1" tabindex="0">—</pre>
+              </div>
+            </div>
+          </div>
+          <div class="leg-card gyro-leg-block">
+            <div class="leg-heading">Leg l2</div>
+            <div class="gyro-imu-pair">
+              <div class="gyro-imu-cell">
+                <div class="gyro-imu-label">IMU 0</div>
+                <pre class="trajectory-pre gyro-pre" data-gyro-cell="l2-0" tabindex="0">—</pre>
+              </div>
+              <div class="gyro-imu-cell">
+                <div class="gyro-imu-label">IMU 1</div>
+                <pre class="trajectory-pre gyro-pre" data-gyro-cell="l2-1" tabindex="0">—</pre>
+              </div>
+            </div>
+          </div>
+          <div class="leg-card gyro-leg-block">
+            <div class="leg-heading">Leg l3</div>
+            <div class="gyro-imu-pair">
+              <div class="gyro-imu-cell">
+                <div class="gyro-imu-label">IMU 0</div>
+                <pre class="trajectory-pre gyro-pre" data-gyro-cell="l3-0" tabindex="0">—</pre>
+              </div>
+              <div class="gyro-imu-cell">
+                <div class="gyro-imu-label">IMU 1</div>
+                <pre class="trajectory-pre gyro-pre" data-gyro-cell="l3-1" tabindex="0">—</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section
+        id="load-panel"
+        class="quick-panel load-panel"
+        aria-label="Jetson CPU load and temperature"
+        hidden
+      >
+        <div class="panel-drag-handle" data-drag-panel="load-panel">
+          <h2>Load</h2>
+        </div>
+        <p class="hint">
+          <code>/jetson/cpu_temp</code> and <code>/jetson/cpu_load_percent</code>
+          (<code>std_msgs/Float32</code>) when ROS is connected.
+        </p>
+        <div class="jetson-metrics" role="group" aria-label="Jetson CPU metrics">
+          <div class="jetson-metric-card">
+            <div class="jetson-metric-label">CPU temperature</div>
+            <div id="cpu-temp-display" class="jetson-metric-value temp-normal">—</div>
+          </div>
+          <div class="jetson-metric-card">
+            <div class="jetson-metric-label">CPU load</div>
+            <div id="cpu-load-display" class="jetson-metric-value load-idle">—</div>
+          </div>
+        </div>
+      </section>
+
+      <section
+        id="planner-status-panel"
+        class="quick-panel planner-status-panel"
+        aria-label="Motion planner status"
+        hidden
+      >
+        <div class="panel-drag-handle" data-drag-panel="planner-status-panel">
+          <h2>Planner</h2>
+        </div>
+        <p class="hint">
+          Subscribes to <code>/planner/status</code> (<code>std_msgs/String</code>) when ROS is connected.
+        </p>
+        <div class="planner-status-body">
+          <div class="planner-status-row">
+            <span class="planner-field-label">State</span>
+            <span id="planner-state" class="planner-state-idle" role="status">—</span>
+          </div>
+          <div class="planner-status-row">
+            <span class="planner-field-label">Goal</span>
+            <span id="planner-goal">—</span>
+          </div>
+          <div class="planner-status-row">
+            <span class="planner-field-label">Progress</span>
+            <span id="planner-progress">—</span>
+          </div>
+          <div class="planner-progress-track" aria-hidden="true">
+            <div id="planner-progress-bar" class="planner-progress-fill"></div>
+          </div>
+        </div>
+      </section>
+
       <section class="log-panel quick-panel" id="log-panel" aria-label="Event log" hidden>
         <div class="panel-drag-handle" data-drag-panel="log-panel">
           <h2>Event Log</h2>
@@ -243,11 +394,14 @@
       </section>
 
       <aside class="panel-launcher" aria-label="Panel launcher">
-        <button type="button" data-panel-target="mode-panel">Mode</button>
         <button type="button" data-panel-target="commands-panel">Commands</button>
         <button type="button" data-panel-target="device-panel">Devices</button>
         <button type="button" data-panel-target="terminal-panel">Console</button>
         <button type="button" data-panel-target="testing-panel">Testing</button>
+        <button type="button" data-panel-target="trajectory-panel">Trajectory</button>
+        <button type="button" data-panel-target="gyro-panel">Gyro</button>
+        <button type="button" data-panel-target="load-panel">Load</button>
+        <button type="button" data-panel-target="planner-status-panel">Status</button>
         <button type="button" data-panel-target="log-panel">Log</button>
       </aside>
     </main>
