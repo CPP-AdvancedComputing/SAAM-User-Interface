@@ -1,4 +1,7 @@
 import * as ROSLIB from "roslib";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 
 // Basic config for ROS topics and legs/joints
 const CONFIG = {
@@ -24,14 +27,10 @@ let testingTopic = null;
 let webCommandTopic = null;
 let isConnected = false;
 let rosReconnectTimer = null;
-let terminalSocket = null;
-let terminalSocketUrl = "";
-let terminalHistory = [];
-let terminalHistoryIndex = -1;
-let terminalPromptHidden = false;
-let terminalCurrentCwd = "~";
-let terminalCurrentUser = "sam";
-let terminalCurrentHost = "10.12.64.222";
+let serviceSocket = null;
+let serviceSocketUrl = "";
+let terminalTabs = [];
+let activeTabIndex = 0;
 let terminalPanelMoved = false;
 let deviceRefreshTimer = null;
 let deviceScanInFlight = false;
@@ -93,50 +92,22 @@ function logLine(tag, message, kind = "info") {
   log.scrollTop = log.scrollHeight;
 }
 
-function appendTerminalOutput(message) {
-  const output = $("terminal-output");
-  if (!output) return;
-  output.textContent += message;
-  requestAnimationFrame(() => {
-    output.scrollTop = output.scrollHeight;
-  });
-}
-
-function formatPromptPath(cwd, username) {
-  const homePrefix = `/home/${username}`;
-  if (!cwd) return "~";
-  if (cwd === homePrefix) return "~";
-  if (cwd.startsWith(homePrefix + "/")) {
-    return "~" + cwd.slice(homePrefix.length);
+function appendToTab(tabIndex, message) {
+  const tab = terminalTabs[tabIndex];
+  if (tab?.term) {
+    tab.term.write(message);
   }
-  return cwd;
 }
 
-function setTerminalPrompt(username, host, cwd) {
-  const prompt = $("terminal-prompt");
-  if (!prompt) return;
-  terminalCurrentUser = username || terminalCurrentUser;
-  terminalCurrentHost = host || terminalCurrentHost;
-  terminalCurrentCwd = formatPromptPath(cwd || terminalCurrentCwd, terminalCurrentUser);
-  prompt.textContent = `${terminalCurrentUser}@${terminalCurrentHost}:${terminalCurrentCwd}$`;
+function getActiveTab() {
+  return terminalTabs[activeTabIndex] ?? null;
 }
 
-function setTerminalPromptVisible(visible) {
-  terminalPromptHidden = !visible;
-  const form = $("terminal-shell-form");
-  const hint = $("terminal-ctrl-hint");
-  const cmdInput = $("terminal-command");
-  const termWindow = $("terminal-window");
-  if (form) form.hidden = !visible;
-  if (hint) hint.hidden = visible;
-  if (termWindow) termWindow.classList.toggle("terminal-listening", !visible);
-  if (cmdInput) cmdInput.disabled = !visible;
-  if (visible) {
-    if (cmdInput) cmdInput.focus();
-  } else {
-    const output = $("terminal-output");
-    if (output) output.focus();
+function getFirstConnectedSocket() {
+  for (const tab of terminalTabs) {
+    if (tab.ws?.readyState === WebSocket.OPEN) return tab.ws;
   }
+  return null;
 }
 
 function setStatus(status, kind = "disconnected") {
@@ -353,6 +324,8 @@ const CMD_DEFAULTS = {
 
 function buildCmdFields() {
   const type = $("cmd-type").value;
+  const legGroup = $("cmd-leg-group");
+  if (legGroup) legGroup.hidden = type === "move";
   const container = $("cmd-fields");
   container.innerHTML = "";
 
@@ -400,12 +373,19 @@ function buildCmdFields() {
 
 function buildCmdPayload() {
   const type = $("cmd-type").value;
-  const leg = $("cmd-leg").value;
+  const leg = $("cmd-leg")?.value ?? "l0";
 
   if (type === "walk") {
     const el = document.getElementById("cmd-f-distance");
     const distance = el ? String(el.value || "").trim() || "5" : "5";
     return { type: "walk", distance };
+  }
+
+  if (type === "move") {
+    const inner = parseFloat(document.getElementById("cmd-f-inner")?.value) || 0;
+    const outer = parseFloat(document.getElementById("cmd-f-outer")?.value) || 0;
+    const servo = parseFloat(document.getElementById("cmd-f-servo")?.value) || 0;
+    return { type: "move", allLegs: true, inner, outer, servo };
   }
 
   const payload = { type, leg_id: leg };
@@ -448,12 +428,21 @@ function publishPayload(dataStr) {
 
 function sendBuiltCommand() {
   const payload = buildCmdPayload();
-  const dataStr = JSON.stringify(payload);
+  let dataStr = JSON.stringify(payload);
 
-  cmdHistory.push(dataStr);
-  cmdHistoryIdx = -1;
-
-  publishPayload(dataStr);
+  if (payload.allLegs && payload.type === "move") {
+    const { inner, outer, servo } = payload;
+    cmdHistory.push(dataStr);
+    cmdHistoryIdx = -1;
+    for (const leg of CONFIG.legs) {
+      const legPayload = { type: "move", leg_id: leg, inner, outer, servo };
+      publishPayload(JSON.stringify(legPayload));
+    }
+  } else {
+    cmdHistory.push(dataStr);
+    cmdHistoryIdx = -1;
+    publishPayload(dataStr);
+  }
 
   const cmdInput = document.getElementById("cmd-f-command");
   if (cmdInput) {
@@ -480,13 +469,21 @@ function addSavedCommand() {
   btn.dataset.cmd = json;
 
   btn.addEventListener("click", () => {
+    let parsed;
     try {
-      JSON.parse(btn.dataset.cmd);
+      parsed = JSON.parse(btn.dataset.cmd);
     } catch {
       logLine("CMD", "Invalid JSON in saved command", "error");
       return;
     }
-    publishPayload(btn.dataset.cmd);
+    if (parsed.allLegs && parsed.type === "move") {
+      const { inner, outer, servo } = parsed;
+      for (const leg of CONFIG.legs) {
+        publishPayload(JSON.stringify({ type: "move", leg_id: leg, inner, outer, servo }));
+      }
+    } else {
+      publishPayload(btn.dataset.cmd);
+    }
   });
 
   btn.addEventListener("contextmenu", (e) => {
@@ -825,9 +822,10 @@ function placeConsolePanel(panel, force = false) {
   }
   if (terminalPanelMoved && !force) return;
 
-  const panelWidth = Math.min(860, Math.floor(window.innerWidth * 0.72));
-  const left = Math.max(24, Math.floor((window.innerWidth - panelWidth) / 2 + 30));
-  const top = Math.max(88, Math.floor((window.innerHeight - 560) / 2));
+  const panelWidth = Math.min(1400, Math.floor(window.innerWidth * 0.94));
+  const panelHeight = Math.min(950, Math.floor(window.innerHeight * 0.88));
+  const left = Math.max(12, Math.floor((window.innerWidth - panelWidth) / 2));
+  const top = Math.max(12, Math.floor((window.innerHeight - panelHeight) / 2));
 
   panel.style.left = `${left}px`;
   panel.style.top = `${top}px`;
@@ -952,6 +950,10 @@ function setupPanelLauncher() {
       panel.hidden = !shouldOpen;
       if (shouldOpen && targetId === "terminal-panel") {
         placeConsolePanel(panel);
+        setTimeout(() => {
+          getActiveTab()?.fitAddon?.fit();
+          getActiveTab()?.term?.focus();
+        }, 50);
       }
       if (shouldOpen) {
         placePanel(panel);
@@ -1079,8 +1081,8 @@ async function launchRosBridge() {
   }
 
   try {
-    await connectTerminalGateway(gatewayUrl);
-    terminalSocket.send(
+    await connectServiceGateway(gatewayUrl);
+    serviceSocket.send(
       JSON.stringify({
         type: "run_command",
         host,
@@ -1090,9 +1092,7 @@ async function launchRosBridge() {
         command: "ros2 launch rosbridge_server rosbridge_websocket_launch.xml &",
       })
     );
-    appendTerminalOutput(
-      `\n${terminalCurrentUser}@${terminalCurrentHost}:${terminalCurrentCwd}$ ros2 launch rosbridge_server rosbridge_websocket_launch.xml &\n`
-    );
+    appendToTab(activeTabIndex, "\r\n$ ros2 launch rosbridge_server rosbridge_websocket_launch.xml &\r\n");
     logLine("ROS", "Launching rosbridge on " + host);
     setTimeout(() => {
       if (btn) { btn.disabled = false; btn.textContent = "Launch"; }
@@ -1113,8 +1113,8 @@ async function requestDeviceScan() {
 
   deviceScanInFlight = true;
   try {
-    await connectTerminalGateway(gatewayUrl);
-    terminalSocket.send(
+    await connectServiceGateway(gatewayUrl);
+    serviceSocket.send(
       JSON.stringify({
         type: "scan_hotspot",
         host,
@@ -1129,101 +1129,291 @@ async function requestDeviceScan() {
   }
 }
 
-function connectTerminalGateway(gatewayUrl) {
+function connectServiceGateway(gatewayUrl) {
   return new Promise((resolve, reject) => {
     if (
-      terminalSocket &&
-      terminalSocket.readyState === WebSocket.OPEN &&
-      terminalSocketUrl === gatewayUrl
+      serviceSocket &&
+      serviceSocket.readyState === WebSocket.OPEN &&
+      serviceSocketUrl === gatewayUrl
     ) {
       resolve();
       return;
     }
 
-    if (terminalSocket && terminalSocket.readyState <= WebSocket.OPEN) {
+    if (serviceSocket && serviceSocket.readyState <= WebSocket.OPEN) {
       try {
-        terminalSocket.close();
+        serviceSocket.close();
       } catch (_err) {
-        // ignore close errors
+        // ignore
       }
     }
 
-    terminalSocket = new WebSocket(gatewayUrl);
-    terminalSocketUrl = gatewayUrl;
+    serviceSocket = new WebSocket(gatewayUrl);
+    serviceSocketUrl = gatewayUrl;
 
-    terminalSocket.addEventListener("open", () => {
-      setTerminalStatus("Connected", "connected");
-      logLine("TERM", "Connected to terminal gateway");
+    serviceSocket.addEventListener("open", () => {
+      updateTerminalStatusFromTabs();
+      logLine("TERM", "Service gateway connected");
       resolve();
     });
 
-    terminalSocket.addEventListener("close", () => {
-      setTerminalStatus("Disconnected", "disconnected");
-      logLine("TERM", "Terminal gateway disconnected");
-      terminalSocket = null;
-      terminalSocketUrl = "";
+    serviceSocket.addEventListener("close", () => {
+      serviceSocket = null;
+      serviceSocketUrl = "";
+      updateTerminalStatusFromTabs();
+      logLine("TERM", "Service gateway disconnected");
     });
 
-    terminalSocket.addEventListener("error", () => {
-      setTerminalStatus("Error", "error");
-      logLine("TERM", "Terminal gateway connection error", "error");
-      appendTerminalOutput("\n[error] Could not connect to terminal gateway.\n");
+    serviceSocket.addEventListener("error", () => {
+      logLine("TERM", "Service gateway connection error", "error");
       reject(new Error("Terminal gateway connection error"));
     });
 
-    terminalSocket.addEventListener("message", (event) => {
+    serviceSocket.addEventListener("message", (event) => {
       let payload;
       try {
         payload = JSON.parse(event.data);
       } catch (_err) {
-        appendTerminalOutput(String(event.data) + "\n");
         return;
       }
-
-      if (payload.type === "output") {
-        appendTerminalOutput(payload.data || "");
-      } else if (payload.type === "status") {
-        appendTerminalOutput(`\n[status] ${payload.message}\n`);
-      } else if (payload.type === "exit") {
-        if (payload.cwd) {
-          setTerminalPrompt(terminalCurrentUser, terminalCurrentHost, payload.cwd);
-        }
-        setTerminalPromptVisible(true);
-      } else if (payload.type === "device_scan_result") {
+      if (payload.type === "device_scan_result") {
         renderDeviceStatuses(payload.devices || []);
         deviceScanInFlight = false;
       } else if (payload.type === "device_scan_error") {
         logLine("DEV", payload.message || "Device scan failed", "error");
         deviceScanInFlight = false;
-      } else if (payload.type === "error") {
-        const msg = String(payload.message || "");
-        if (msg.toLowerCase().includes("unsupported message type")) {
-          deviceScanInFlight = false;
-          return;
-        }
-        appendTerminalOutput(`\n[error] ${payload.message}\n`);
-        logLine("TERM", payload.message, "error");
-        deviceScanInFlight = false;
-        setTerminalPromptVisible(true);
       }
     });
   });
 }
 
+function updateTerminalStatusFromTabs() {
+  const anyConnected = terminalTabs.some((t) => t.ws?.readyState === WebSocket.OPEN);
+  const serviceConnected = serviceSocket?.readyState === WebSocket.OPEN;
+  setTerminalStatus(anyConnected || serviceConnected ? "Connected" : "Disconnected", anyConnected || serviceConnected ? "connected" : "disconnected");
+}
+
+function connectTabGateway(tab, gatewayUrl) {
+  return new Promise((resolve, reject) => {
+    if (tab.ws?.readyState === WebSocket.OPEN && tab.gatewayUrl === gatewayUrl) {
+      resolve();
+      return;
+    }
+    if (tab.ws?.readyState <= WebSocket.OPEN) {
+      try {
+        tab.ws?.close();
+      } catch (_err) {}
+    }
+
+    const ws = new WebSocket(gatewayUrl);
+    tab.ws = ws;
+    tab.gatewayUrl = gatewayUrl;
+
+    ws.addEventListener("open", () => {
+      updateTerminalStatusFromTabs();
+      resolve();
+    });
+
+    ws.addEventListener("close", () => {
+      tab.shellReady = false;
+      if (tab.ws === ws) tab.ws = null;
+      updateTerminalStatusFromTabs();
+    });
+
+    ws.addEventListener("error", () => {
+      const idx = terminalTabs.indexOf(tab);
+      if (idx >= 0) appendToTab(idx, "\r\n[error] Could not connect to terminal gateway.\r\n");
+      reject(new Error("Terminal gateway connection error"));
+    });
+
+    ws.addEventListener("message", (event) => {
+      const idx = terminalTabs.indexOf(tab);
+      if (idx < 0) return;
+      let payload;
+      try {
+        payload = JSON.parse(event.data);
+      } catch (_err) {
+        appendToTab(idx, String(event.data) + "\r\n");
+        return;
+      }
+      if (payload.type === "output") {
+        appendToTab(idx, payload.data || "");
+      } else if (payload.type === "status") {
+        appendToTab(idx, `\r\n[status] ${payload.message}\r\n`);
+        if (String(payload.message || "").includes("Shell ready")) {
+          tab.shellReady = true;
+        }
+      } else if (payload.type === "error") {
+        appendToTab(idx, `\r\n[error] ${payload.message}\r\n`);
+        logLine("TERM", payload.message, "error");
+      }
+    });
+  });
+}
+
+function createTerminalTab(label) {
+  const tabsList = $("terminal-tabs-list");
+  const tabsContent = $("terminal-tabs-content");
+  if (!tabsList || !tabsContent) return null;
+
+  const index = terminalTabs.length;
+  const pane = document.createElement("div");
+  pane.className = "terminal-tab-pane" + (index === 0 ? " is-active" : "");
+  pane.setAttribute("role", "tabpanel");
+
+  const container = document.createElement("div");
+  container.className = "terminal-xterm-container";
+
+  pane.appendChild(container);
+  tabsContent.appendChild(pane);
+
+  const term = new Terminal({
+    cursorBlink: true,
+    fontFamily: "ui-monospace, Menlo, Monaco, Consolas, monospace",
+    fontSize: 13,
+    theme: { background: "rgba(3, 8, 20, 0.99)", foreground: "#d1fae5" },
+  });
+  const fitAddon = new FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(container);
+  fitAddon.fit();
+
+  const tab = {
+    id: "tab-" + Date.now(),
+    label,
+    ws: null,
+    gatewayUrl: "",
+    term,
+    fitAddon,
+    shellReady: false,
+    paneEl: pane,
+    containerEl: container,
+  };
+  terminalTabs.push(tab);
+
+  container.addEventListener("click", () => term.focus());
+
+  term.onData((data) => {
+    if (tab.ws?.readyState === WebSocket.OPEN) {
+      tab.ws.send(JSON.stringify({ type: "input", data }));
+      if (!tab.shellReady) {
+        term.write(data);
+        if (data === "\r" || data === "\n") {
+          term.write("\r\n[Click Connect above to start an SSH session and run commands.]\r\n");
+        }
+      }
+    } else {
+      term.write(data);
+      if (data === "\r" || data === "\n") {
+        term.write("\r\n[Click Connect above to start an SSH session and run commands.]\r\n");
+      }
+    }
+  });
+
+  const tabBtn = document.createElement("button");
+  tabBtn.type = "button";
+  tabBtn.className = "terminal-tab-btn" + (index === 0 ? " is-active" : "");
+  tabBtn.setAttribute("role", "tab");
+  tabBtn.setAttribute("aria-selected", index === 0 ? "true" : "false");
+  tabBtn.dataset.tabIndex = String(index);
+  tabBtn.appendChild(document.createTextNode(label));
+  tab.tabBtnEl = tabBtn;
+
+  tabBtn.addEventListener("click", (e) => {
+    if (e.target.classList.contains("tab-close")) return;
+    switchTerminalTab(index);
+  });
+
+  const closeSpan = document.createElement("span");
+  closeSpan.className = "tab-close";
+  closeSpan.textContent = "×";
+  closeSpan.setAttribute("aria-label", "Close tab");
+  closeSpan.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeTerminalTab(index);
+  });
+  tabBtn.appendChild(closeSpan);
+
+  tabsList.appendChild(tabBtn);
+
+  const resizeObserver = new ResizeObserver(() => {
+    if (terminalTabs[index] && activeTabIndex === index) {
+      terminalTabs[index].fitAddon?.fit();
+    }
+  });
+  resizeObserver.observe(container);
+
+  return tab;
+}
+
+function switchTerminalTab(index) {
+  if (index < 0 || index >= terminalTabs.length) return;
+  activeTabIndex = index;
+  terminalTabs.forEach((tab, i) => {
+    const isActive = i === index;
+    tab.paneEl.classList.toggle("is-active", isActive);
+    tab.tabBtnEl?.classList.toggle("is-active", isActive);
+    tab.tabBtnEl?.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+  const tab = terminalTabs[index];
+  tab?.fitAddon?.fit();
+  tab?.term?.focus();
+}
+
+function closeTerminalTab(index) {
+  if (terminalTabs.length <= 1) return;
+  const tab = terminalTabs[index];
+  if (tab?.ws) {
+    try {
+      tab.ws.close();
+    } catch (_err) {}
+  }
+  tab?.term?.dispose();
+  tab?.paneEl?.remove();
+  tab?.tabBtnEl?.remove();
+  terminalTabs.splice(index, 1);
+  if (activeTabIndex >= terminalTabs.length) activeTabIndex = Math.max(0, terminalTabs.length - 1);
+  if (activeTabIndex > index) activeTabIndex--;
+  terminalTabs.forEach((t, i) => {
+    t.tabBtnEl.dataset.tabIndex = String(i);
+  });
+  switchTerminalTab(activeTabIndex);
+}
+
+function connectActiveTab() {
+  const tab = getActiveTab();
+  if (!tab) return;
+  const { gatewayUrl, host, port, username, password } = getTerminalConnectionConfig();
+  if (!gatewayUrl || !host || !username) {
+    logLine("TERM", "Gateway, host, and user are required", "error");
+    return;
+  }
+  const connectBtn = $("terminal-connect-btn");
+  connectBtn.disabled = true;
+  connectTabGateway(tab, gatewayUrl)
+    .then(() => {
+      tab.ws.send(
+        JSON.stringify({ type: "connect", host, port, username, password })
+      );
+      appendToTab(terminalTabs.indexOf(tab), "\r\n[Connecting to " + host + "...]\r\n");
+      logLine("TERM", "Connecting to " + host);
+    })
+    .catch((err) => {
+      logLine("TERM", err.message || "Connection failed", "error");
+    })
+    .finally(() => {
+      connectBtn.disabled = false;
+    });
+}
+
 function setupTerminalForm() {
-  const form = $("terminal-shell-form");
+  const connectBtn = $("terminal-connect-btn");
   const settingsBtn = $("terminal-settings-toggle-btn");
   const settingsPanel = $("terminal-settings");
   const gatewayInput = $("terminal-gateway-url");
-  const hostInput = $("terminal-host");
-  const portInput = $("terminal-port");
-  const userInput = $("terminal-user");
   const passwordInput = $("terminal-password");
-  const commandInput = $("terminal-command");
   const refreshDevicesBtn = $("refresh-devices-btn");
   const autoRefreshDevices = $("auto-refresh-devices");
-
-  if (!form) return;
 
   gatewayInput.value = CONFIG.terminal.gatewayUrl;
   if (passwordInput && !passwordInput.value) {
@@ -1236,7 +1426,6 @@ function setupTerminalForm() {
       settingsBtn.setAttribute("aria-expanded", String(expanded));
       settingsBtn.classList.toggle("is-active", expanded);
     }
-
     syncSettingsToggleState();
     settingsBtn.addEventListener("click", () => {
       settingsPanel.hidden = !settingsPanel.hidden;
@@ -1244,40 +1433,9 @@ function setupTerminalForm() {
     });
   }
 
-  setTerminalPrompt(
-    (userInput.value || "sam").trim(),
-    (hostInput.value || "10.42.0.1").trim(),
-    "~"
-  );
-  appendTerminalOutput("S.A.M. Jetson terminal ready.\n");
-
-  const termWindow = $("terminal-window");
-  const termPanel = $("terminal-panel");
-  if (termWindow) {
-    termWindow.addEventListener("click", (e) => {
-      if (e.target === termWindow || e.target === $("terminal-output")) {
-        (terminalPromptHidden ? $("terminal-output") : commandInput)?.focus();
-      }
-    });
-  }
-
-  document.addEventListener("keydown", (e) => {
-    if (!terminalPromptHidden || !termPanel || termPanel.hidden) return;
-    if (e.ctrlKey && e.key === "c") {
-      e.preventDefault();
-      if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
-        terminalSocket.send(JSON.stringify({ type: "interrupt" }));
-        setTerminalPromptVisible(true);
-      }
-    }
-  });
-
   if (refreshDevicesBtn) {
-    refreshDevicesBtn.addEventListener("click", () => {
-      requestDeviceScan();
-    });
+    refreshDevicesBtn.addEventListener("click", () => requestDeviceScan());
   }
-
   if (autoRefreshDevices) {
     autoRefreshDevices.addEventListener("change", () => {
       if (deviceRefreshTimer) {
@@ -1289,83 +1447,39 @@ function setupTerminalForm() {
         deviceRefreshTimer = setInterval(requestDeviceScan, 5000);
       }
     });
-
     if (autoRefreshDevices.checked) {
       deviceRefreshTimer = setInterval(requestDeviceScan, 5000);
     }
   }
 
-  commandInput.addEventListener("keydown", (e) => {
-    if (e.key === "ArrowUp") {
-      if (terminalHistory.length === 0) return;
-      e.preventDefault();
-      terminalHistoryIndex = Math.max(0, terminalHistoryIndex - 1);
-      commandInput.value = terminalHistory[terminalHistoryIndex];
-      return;
-    }
+  createTerminalTab("1");
+  let tabCounter = 2;
 
-    if (e.key === "ArrowDown") {
-      if (terminalHistory.length === 0) return;
-      e.preventDefault();
-      terminalHistoryIndex = Math.min(
-        terminalHistory.length,
-        terminalHistoryIndex + 1
-      );
-      commandInput.value =
-        terminalHistoryIndex === terminalHistory.length
-          ? ""
-          : terminalHistory[terminalHistoryIndex];
-    }
+  $("terminal-add-tab-btn")?.addEventListener("click", () => {
+    const tab = createTerminalTab(String(tabCounter++));
+    if (tab) switchTerminalTab(terminalTabs.length - 1);
   });
 
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const gatewayUrl = (gatewayInput.value || "").trim();
-    const host = (hostInput.value || "").trim();
-    const port = Number.parseInt((portInput.value || "").trim(), 10) || 22;
-    const username = (userInput.value || "").trim();
-    const password = passwordInput.value || "";
-    const command = (commandInput.value || "").trim();
+  connectBtn?.addEventListener("click", connectActiveTab);
 
-    if (!gatewayUrl || !host || !username || !command) {
-      logLine(
-        "TERM",
-        "Gateway URL, host, user, and terminal command are required",
-        "error"
-      );
-      return;
-    }
+  const tabsContent = $("terminal-tabs-content");
+  if (tabsContent) {
+    const ro = new ResizeObserver(() => {
+      getActiveTab()?.fitAddon?.fit();
+    });
+    ro.observe(tabsContent);
+  }
 
-    terminalHistory.push(command);
-    terminalHistoryIndex = terminalHistory.length;
-    appendTerminalOutput(
-      `\n${terminalCurrentUser}@${terminalCurrentHost}:${terminalCurrentCwd}$ ${command}\n`
-    );
-    commandInput.value = "";
-    setTerminalPrompt(username, host, terminalCurrentCwd);
-    setTerminalPromptVisible(false);
-
-    try {
-      await connectTerminalGateway(gatewayUrl);
-      terminalSocket.send(
-        JSON.stringify({
-          type: "run_command",
-          host,
-          port,
-          username,
-          password,
-          command,
-        })
-      );
-      logLine("TERM", `Command sent to ${host}: ${command}`);
-    } catch (err) {
-      appendTerminalOutput(`\n[error] ${err.message || "Failed to send terminal command"}\n`);
-      logLine("TERM", err.message || "Failed to send terminal command", "error");
-      setTerminalPromptVisible(true);
-    }
-  });
+  appendToTab(0, "S.A.M. Jetson terminal ready.\r\n");
 
   requestDeviceScan();
+
+  setTimeout(() => {
+    const cfg = getTerminalConnectionConfig();
+    if (cfg.gatewayUrl && cfg.host && cfg.username) {
+      connectActiveTab();
+    }
+  }, 300);
 }
 
 function setupInitialFocus() {
@@ -1413,10 +1527,34 @@ window.addEventListener("DOMContentLoaded", () => {
     launchBtn.addEventListener("click", launchRosBridge);
   }
 
+  const E_STOP_PAYLOAD = JSON.stringify({ type: "estop", value: true });
+  const START_PAYLOAD = JSON.stringify({ type: "estop", value: false });
+  const estopBtn = $("estop-btn");
+  const startBtn = $("start-btn");
+  if (estopBtn) {
+    estopBtn.addEventListener("click", () => {
+      publishPayload(E_STOP_PAYLOAD);
+      startBtn?.removeAttribute("hidden");
+    });
+  }
+  if (startBtn) {
+    startBtn.addEventListener("click", () => {
+      publishPayload(START_PAYLOAD);
+      startBtn.hidden = true;
+    });
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "`" && e.key !== "Backquote") return;
+    const tag = e.target?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || e.target?.isContentEditable) return;
+    e.preventDefault();
+    publishPayload(E_STOP_PAYLOAD);
+    estopBtn?.focus();
+  });
 
   logLine("INFO", "S.A.M. Control Interface ready");
   logLine(
     "HINT",
-    "Keyboard hints: Tab to move, Space/Enter to activate, Alt+S = command preset, Alt+C = command line. In stepper fields, Enter sends velocity."
+    "Keyboard hints: ` = E-Stop, Tab to move, Space/Enter to activate, Alt+S = command preset, Alt+C = command line. In stepper fields, Enter sends velocity."
   );
 });

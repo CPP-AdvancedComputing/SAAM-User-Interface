@@ -17,10 +17,27 @@ function stripAnsi(input) {
     .replace(/\r/g, "");
 }
 
+function extractExitMarker(buffer) {
+  const match = buffer.match(/__SAM_EXIT__:(\d+):(-?\d+):([^\n]*)(\n|$)/);
+  if (!match) return { before: buffer, marker: null, after: "" };
+  const idx = match.index;
+  const before = buffer.slice(0, idx);
+  const after = buffer.slice(idx + match[0].length);
+  return {
+    before,
+    marker: { id: Number(match[1]), code: Number(match[2]), cwd: (match[3] || "").trim() },
+    after,
+  };
+}
+
 function send(ws, payload) {
   if (ws.readyState === 1) {
     ws.send(JSON.stringify(payload));
   }
+}
+
+function toCrlf(str) {
+  return str.replace(/\r?\n/g, "\r\n");
 }
 
 const wss = new WebSocketServer({ port: PORT });
@@ -68,57 +85,47 @@ wss.on("connection", (ws) => {
 
   function flushBufferedOutput() {
     if (session.lineBuffer) {
-      send(ws, { type: "output", stream: "stdout", data: session.lineBuffer });
+      send(ws, { type: "output", stream: "stdout", data: toCrlf(session.lineBuffer) });
       session.lineBuffer = "";
     }
   }
 
   function processShellData(chunk) {
-    session.lineBuffer += stripAnsi(chunk.toString());
+    const raw = chunk.toString();
+    session.lineBuffer += raw;
 
-    let newlineIndex = session.lineBuffer.indexOf("\n");
-    while (newlineIndex !== -1) {
-      const line = session.lineBuffer.slice(0, newlineIndex + 1);
-      session.lineBuffer = session.lineBuffer.slice(newlineIndex + 1);
-
-      if (!session.ready) {
-        if (line.includes("__SAM_READY__")) {
-          session.ready = true;
-          processQueue();
-        }
-        newlineIndex = session.lineBuffer.indexOf("\n");
-        continue;
-      }
-
-      const marker = line.match(/__SAM_EXIT__:(\d+):(-?\d+):(.*)\n?$/);
-      if (marker) {
-        const prefix = line.slice(0, marker.index || 0);
-        if (prefix) {
-          const cleanedPrefix = prefix.replace(/printf "__SAM_EXIT__:[^\n]*/g, "");
-          if (cleanedPrefix.trim().length > 0) {
-            send(ws, { type: "output", stream: "stdout", data: cleanedPrefix });
-          }
-        }
-
-        const markerId = Number(marker[1]);
-        const code = Number(marker[2]);
-        const cwd = (marker[3] || "").trim();
-        if (session.active && session.active.id === markerId) {
-          send(ws, {
-            type: "exit",
-            code: Number.isFinite(code) ? code : 0,
-            cwd,
-          });
-          session.active = null;
-          processQueue();
-        }
-      } else if (line.includes(`printf "__SAM_EXIT__:`)) {
-        // Suppress internal completion marker echo.
+    if (!session.ready) {
+      const readyIdx = session.lineBuffer.indexOf("__SAM_READY__");
+      if (readyIdx >= 0) {
+        const before = session.lineBuffer.slice(0, readyIdx).replace(/\n?__SAM_READY__\n?/g, "");
+        if (before) send(ws, { type: "output", stream: "stdout", data: toCrlf(before) });
+        session.ready = true;
+        session.lineBuffer = session.lineBuffer.slice(readyIdx + "__SAM_READY__".length);
+        processQueue();
       } else {
-        send(ws, { type: "output", stream: "stdout", data: line });
+        send(ws, { type: "output", stream: "stdout", data: toCrlf(raw) });
       }
+      return;
+    }
 
-      newlineIndex = session.lineBuffer.indexOf("\n");
+    for (;;) {
+      const { before, marker, after } = extractExitMarker(session.lineBuffer);
+      session.lineBuffer = after;
+
+      if (before) {
+        send(ws, { type: "output", stream: "stdout", data: toCrlf(before) });
+      }
+      if (!marker) break;
+
+      if (session.active && session.active.id === marker.id) {
+        send(ws, {
+          type: "exit",
+          code: Number.isFinite(marker.code) ? marker.code : 0,
+          cwd: marker.cwd,
+        });
+        session.active = null;
+        processQueue();
+      }
     }
   }
 
@@ -156,7 +163,7 @@ wss.on("connection", (ws) => {
 
       ssh
         .on("ready", () => {
-          ssh.shell({ term: "xterm-color" }, (err, stream) => {
+          ssh.shell({ term: "xterm-256color" }, (err, stream) => {
             if (err) {
               send(ws, {
                 type: "error",
@@ -183,7 +190,7 @@ wss.on("connection", (ws) => {
               send(ws, {
                 type: "output",
                 stream: "stderr",
-                data: data.toString(),
+                data: toCrlf(data.toString()),
               });
             });
 
@@ -192,16 +199,9 @@ wss.on("connection", (ws) => {
               message: `Shell connected to ${requestedKey}`,
             });
 
-            // Normalize shell behavior for cleaner web-terminal output.
-            stream.write("stty -echo >/dev/null 2>&1 || true\n");
-            stream.write("export TERM=dumb\n");
+            stream.write("export TERM=xterm-256color\n");
             stream.write("unset PROMPT_COMMAND\n");
-            stream.write("export PS1=''\n");
-            stream.write("set +o vi >/dev/null 2>&1 || true\n");
-            stream.write(
-              "bind 'set enable-bracketed-paste off' >/dev/null 2>&1 || true\n"
-            );
-            stream.write("alias ls='ls --color=never' >/dev/null 2>&1 || true\n");
+            stream.write("export PS1='\\u@\\h:\\w$ '\n");
             stream.write("printf '__SAM_READY__\\n'\n");
 
             resolve();
@@ -286,6 +286,28 @@ wss.on("connection", (ws) => {
       if (session.shell && session.ready) {
         session.shell.write("\x03");
       }
+      return;
+    }
+
+    if (type === "input" && (typeof message.data === "string" || Buffer.isBuffer(message.data))) {
+      if (session.shell && session.ready) {
+        session.shell.write(typeof message.data === "string" ? message.data : message.data.toString());
+      }
+      return;
+    }
+
+    if (type === "connect") {
+      if (!host || !username) {
+        send(ws, { type: "error", message: "host and username are required." });
+        return;
+      }
+      ensureShellConnection({ host, port, username, password })
+        .then(() => {
+          send(ws, { type: "status", message: `Shell ready for ${host}` });
+        })
+        .catch((err) => {
+          send(ws, { type: "error", message: `Unable to connect: ${err.message}` });
+        });
       return;
     }
 

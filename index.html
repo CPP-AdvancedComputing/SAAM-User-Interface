@@ -41,6 +41,23 @@
           >
             Launch
           </button>
+          <button
+            id="estop-btn"
+            class="estop-btn"
+            type="button"
+            title="Emergency stop (`)"
+          >
+            E-Stop
+          </button>
+          <button
+            id="start-btn"
+            class="start-btn"
+            type="button"
+            title="Resume (`)"
+            hidden
+          >
+            Start
+          </button>
         </div>
         <div id="ros-meta-panel" class="ros-meta-panel" hidden>
           <span class="ros-endpoint-label">ROS bridge</span>
@@ -89,7 +106,7 @@
                 <option value="walk">walk</option>
               </select>
             </div>
-            <div class="field-group">
+            <div id="cmd-leg-group" class="field-group">
               <label for="cmd-leg">Leg</label>
               <select id="cmd-leg">
                 <option value="l0">l0</option>
@@ -155,7 +172,7 @@
             </button>
           </div>
         </div>
-        <div id="terminal-settings" class="terminal-settings" aria-label="Jetson terminal settings">
+        <div id="terminal-settings" class="terminal-settings" aria-label="Jetson terminal settings" hidden>
           <div class="field-group">
             <label for="terminal-gateway-url">Gateway</label>
             <input id="terminal-gateway-url" type="text" value="ws://localhost:8787" autocomplete="off" />
@@ -182,25 +199,12 @@
         </div>
 
         <div id="terminal-window" class="terminal-window">
-          <div
-            id="terminal-output"
-            class="terminal-output"
-            tabindex="0"
-            aria-live="polite"
-            aria-label="Jetson terminal output"
-          ></div>
-          <div id="terminal-ctrl-hint" class="terminal-ctrl-hint" hidden>Ctrl+C to stop</div>
-          <form id="terminal-shell-form" class="terminal-inline-form">
-            <label class="sr-only" for="terminal-command">Terminal command line</label>
-            <span id="terminal-prompt" class="terminal-prompt">sam@jetson:~$</span>
-            <input
-              id="terminal-command"
-              class="terminal-command-input"
-              type="text"
-              autocomplete="off"
-              spellcheck="false"
-            />
-          </form>
+          <div id="terminal-tabs-bar" class="terminal-tabs-bar">
+            <div id="terminal-tabs-list" class="terminal-tabs-list" role="tablist"></div>
+            <button id="terminal-add-tab-btn" type="button" title="New tab" aria-label="New tab">+</button>
+            <button id="terminal-connect-btn" type="button">Connect</button>
+          </div>
+          <div id="terminal-tabs-content" class="terminal-tabs-content"></div>
         </div>
       </section>
 
