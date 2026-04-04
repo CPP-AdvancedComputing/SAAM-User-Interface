@@ -2,6 +2,7 @@ import * as ROSLIB from "roslib";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { initRobotRenderUI } from "./robot-render.js";
 
 // Basic config for ROS topics and legs/joints
 const CONFIG = {
@@ -15,8 +16,8 @@ const CONFIG = {
     commandMessageType: "std_msgs/msg/String",
     testingMessageType: "std_msgs/msg/String",
     legCommandMessageType: "sam_interfaces/msg/LegCommand",
-    imuDataTopic: "/imu/data",
     imuMessageType: "sensor_msgs/Imu",
+    imuRollPitchMessageType: "std_msgs/String",
     legEnabledStateMessageType: "std_msgs/msg/Bool",
     jetsonCpuTempTopic: "/jetson/cpu_temp",
     jetsonCpuLoadTopic: "/jetson/cpu_load_percent",
@@ -27,10 +28,44 @@ const CONFIG = {
     gatewayUrl: "ws://localhost:8787",
   },
   legs: ["l0", "l1", "l2", "l3"],
-  imuPerLeg: 2,
-  joints: ["inner_stepper", "outer_stepper", "hip", "yaw", "pitch", "roll"],
+  joints: ["inner_stepper", "outer_stepper", "servo"],
 };
 const DEFAULT_TERMINAL_PASSWORD = import.meta.env.VITE_TERMINAL_PASSWORD || "";
+
+/** Per-leg IMU topic paths (filtered IMU, String summary, debug raw). */
+const legImuTopics = {
+  l0: { imu: "/l0/imu/data", rollPitch: "/l0/imu/roll_pitch_deg", raw: "/l0/imu/data_raw" },
+  l1: { imu: "/l1/imu/data", rollPitch: "/l1/imu/roll_pitch_deg", raw: "/l1/imu/data_raw" },
+  l2: { imu: "/l2/imu/data", rollPitch: "/l2/imu/roll_pitch_deg", raw: "/l2/imu/data_raw" },
+  l3: { imu: "/l3/imu/data", rollPitch: "/l3/imu/roll_pitch_deg", raw: "/l3/imu/data_raw" },
+};
+
+/**
+ * Per-leg UI + ROS state (no shared global IMU store).
+ * latestRollPitch parsed numbers feed the stance prism view.
+ */
+const legImuRegistry = Object.fromEntries(
+  CONFIG.legs.map((id) => [
+    id,
+    {
+      latestImDisplay: null,
+      latestRollPitchReadout: null,
+      latestRawDisplay: null,
+      /** Latest values from `/lN/imu/roll_pitch_deg` before zero offset. */
+      rollDegSensor: 0,
+      pitchDegSensor: 0,
+      /** Subtracted from sensor values so display / Render show 0° at the homed pose. */
+      rollPitchZeroRoll: 0,
+      rollPitchZeroPitch: 0,
+      /** Displayed roll/pitch (sensor minus zero). */
+      rollDeg: 0,
+      pitchDeg: 0,
+    },
+  ])
+);
+
+let legImuRosTopics = [];
+let legImuUiRaf = null;
 
 let ros = null;
 let commandTopic = null;
@@ -40,9 +75,6 @@ let poseSequenceTopic = null;
 let legCommandTopic = null;
 let trajectoryLegCommandRaf = null;
 const trajectoryLegPending = new Map();
-let imuDataRosTopic = null;
-let imuDisplayRaf = null;
-const imuPending = new Map();
 /** Latest enable flag per leg from `/{lN}/enabled_state` only (not from clicks). */
 const legEnableStates = {};
 const legEnableRosTopics = [];
@@ -213,19 +245,30 @@ function teardownLegEnableTopics() {
 }
 
 function teardownImuTopics() {
-  if (imuDataRosTopic) {
+  for (const t of legImuRosTopics) {
     try {
-      imuDataRosTopic.unsubscribe();
+      t.unsubscribe();
     } catch (_e) {
       // ignore
     }
-    imuDataRosTopic = null;
   }
-  if (imuDisplayRaf != null) {
-    cancelAnimationFrame(imuDisplayRaf);
-    imuDisplayRaf = null;
+  legImuRosTopics = [];
+  if (legImuUiRaf != null) {
+    cancelAnimationFrame(legImuUiRaf);
+    legImuUiRaf = null;
   }
-  imuPending.clear();
+  for (const id of CONFIG.legs) {
+    const r = legImuRegistry[id];
+    r.latestImDisplay = null;
+    r.latestRollPitchReadout = null;
+    r.latestRawDisplay = null;
+    r.rollDegSensor = 0;
+    r.pitchDegSensor = 0;
+    r.rollPitchZeroRoll = 0;
+    r.rollPitchZeroPitch = 0;
+    r.rollDeg = 0;
+    r.pitchDeg = 0;
+  }
 }
 
 function teardownJetsonLoadTopics() {
@@ -682,83 +725,217 @@ function initTrajectoryTopics() {
   });
 }
 
-function parseImuRoutingFromFrameId(frameId) {
-  if (!frameId || typeof frameId !== "string") return null;
-  const s = frameId.trim();
-  const legMatch = s.match(/(?:^|[^a-zA-Z0-9])(?:leg[_\s-]?|l)(\d+)/i);
-  const imuMatch = s.match(/imu[_\s-]?(\d+)/i);
-  const leg = legMatch ? Number.parseInt(legMatch[1], 10) : NaN;
-  let imu = imuMatch ? Number.parseInt(imuMatch[1], 10) : NaN;
-  if (!Number.isFinite(leg) || leg < 0 || leg >= CONFIG.legs.length) return null;
-  if (!Number.isFinite(imu)) imu = 0;
-  if (imu < 0 || imu >= CONFIG.imuPerLeg) return null;
-  return { leg, imu };
+/** Quaternion (geometry_msgs convention x,y,z,w) to roll, pitch, yaw in radians (ZYX / yaw-pitch-roll order). */
+function quatToRollPitchYawRad(q) {
+  const x = Number(q?.x);
+  const y = Number(q?.y);
+  const z = Number(q?.z);
+  const w = Number(q?.w);
+  if (![x, y, z, w].every((v) => Number.isFinite(v))) {
+    return { roll: NaN, pitch: NaN, yaw: NaN };
+  }
+  const sinrCosp = 2 * (w * x + y * z);
+  const cosrCosp = 1 - 2 * (x * x + y * y);
+  const roll = Math.atan2(sinrCosp, cosrCosp);
+  const sinp = 2 * (w * y - z * x);
+  let pitch;
+  if (Math.abs(sinp) >= 1) {
+    pitch = Math.PI / 2 * Math.sign(sinp);
+  } else {
+    pitch = Math.asin(sinp);
+  }
+  const sinyCosp = 2 * (w * z + x * y);
+  const cosyCosp = 1 - 2 * (y * y + z * z);
+  const yaw = Math.atan2(sinyCosp, cosyCosp);
+  return { roll, pitch, yaw };
 }
 
-function formatImuForDisplay(message, note) {
+function radToDeg(r) {
+  if (!Number.isFinite(r)) return null;
+  return (r * 180) / Math.PI;
+}
+
+function formatFilteredImuForDisplay(message, topicName) {
+  const ori = message?.orientation ?? {};
   const la = message?.linear_acceleration ?? {};
   const av = message?.angular_velocity ?? {};
-  const payload = {
-    frame_id: message?.header?.frame_id ?? "",
-    accel: {
-      x: la.x,
-      y: la.y,
-      z: la.z,
-    },
-    gyro: {
-      x: av.x,
-      y: av.y,
-      z: av.z,
-    },
+  const quat = { x: ori.x, y: ori.y, z: ori.z, w: ori.w };
+  const rpy = quatToRollPitchYawRad(quat);
+  const fmtDeg = (rad) => {
+    const d = radToDeg(rad);
+    return d == null ? null : Number(d.toFixed(4));
   };
-  if (note) payload._routing_note = note;
+  const payload = {
+    topic: topicName,
+    frame_id: message?.header?.frame_id ?? "",
+    orientation_quaternion: { x: ori.x, y: ori.y, z: ori.z, w: ori.w },
+    orientation_euler_deg: {
+      roll_deg: fmtDeg(rpy.roll),
+      pitch_deg: fmtDeg(rpy.pitch),
+      yaw_deg: fmtDeg(rpy.yaw),
+    },
+    angular_velocity: { x: av.x, y: av.y, z: av.z },
+    linear_acceleration: { x: la.x, y: la.y, z: la.z },
+  };
   return JSON.stringify(payload, null, 2);
 }
 
-function flushImuDisplays() {
-  imuDisplayRaf = null;
-  imuPending.forEach((text, key) => {
-    const pre = document.querySelector(`[data-gyro-cell="${key}"]`);
-    if (pre) pre.textContent = text;
-  });
-  imuPending.clear();
+/** Parse roll_pitch_deg string: roll_deg=..,pitch_deg=.., JSON, or two numbers. */
+function parseRollPitchDegString(raw) {
+  const s = raw != null ? String(raw).trim() : "";
+  if (!s) return { summary: "—", roll_deg: null, pitch_deg: null };
+  const keyVal = s.match(
+    /roll_deg\s*=\s*(-?\d+\.?\d*)\s*,\s*pitch_deg\s*=\s*(-?\d+\.?\d*)/i
+  );
+  if (keyVal) {
+    const rd = Number(keyVal[1]);
+    const pd = Number(keyVal[2]);
+    if (Number.isFinite(rd) && Number.isFinite(pd)) {
+      return {
+        summary: `roll ${rd.toFixed(2)}° · pitch ${pd.toFixed(2)}°`,
+        roll_deg: rd,
+        pitch_deg: pd,
+      };
+    }
+  }
+  try {
+    const j = JSON.parse(s);
+    if (j && typeof j === "object") {
+      const rd = j.roll_deg ?? j.roll ?? j.rollDeg;
+      const pd = j.pitch_deg ?? j.pitch ?? j.pitchDeg;
+      if (Number.isFinite(Number(rd)) && Number.isFinite(Number(pd))) {
+        return {
+          summary: `roll ${Number(rd).toFixed(2)}° · pitch ${Number(pd).toFixed(2)}°`,
+          roll_deg: Number(rd),
+          pitch_deg: Number(pd),
+        };
+      }
+    }
+  } catch (_e) {
+    // not JSON
+  }
+  const numPair = s.match(/(-?\d+\.?\d*)[^\d.+-]+(-?\d+\.?\d*)/);
+  if (numPair) {
+    const rd = Number(numPair[1]);
+    const pd = Number(numPair[2]);
+    if (Number.isFinite(rd) && Number.isFinite(pd)) {
+      return {
+        summary: `roll ${rd.toFixed(2)}° · pitch ${pd.toFixed(2)}°`,
+        roll_deg: rd,
+        pitch_deg: pd,
+      };
+    }
+  }
+  return { summary: s, roll_deg: null, pitch_deg: null };
+}
+
+function applyRollPitchDisplayForLeg(legId) {
+  const r = legImuRegistry[legId];
+  if (!r) return;
+  const sr = r.rollDegSensor;
+  const sp = r.pitchDegSensor;
+  if (!Number.isFinite(sr) || !Number.isFinite(sp)) return;
+  r.rollDeg = sr - r.rollPitchZeroRoll;
+  r.pitchDeg = sp - r.rollPitchZeroPitch;
+  r.latestRollPitchReadout = `roll ${r.rollDeg.toFixed(2)}\u00b0 \u00b7 pitch ${r.pitchDeg.toFixed(2)}\u00b0`;
+}
+
+/** Set current sensor roll/pitch as the new 0° reference (display, stance viz, 3D Render). */
+function zeroImuRollPitchDisplay() {
+  for (const id of CONFIG.legs) {
+    const r = legImuRegistry[id];
+    r.rollPitchZeroRoll = Number.isFinite(r.rollDegSensor) ? r.rollDegSensor : 0;
+    r.rollPitchZeroPitch = Number.isFinite(r.pitchDegSensor) ? r.pitchDegSensor : 0;
+    applyRollPitchDisplayForLeg(id);
+  }
+  scheduleLegImuUiUpdate();
+  logLine("GYRO", "Roll/pitch display zeroed (current attitude is now 0° reference per leg)", "info");
+}
+
+function scheduleLegImuUiUpdate() {
+  if (legImuUiRaf != null) return;
+  legImuUiRaf = requestAnimationFrame(flushLegImuUi);
+}
+
+function flushLegImuUi() {
+  legImuUiRaf = null;
+  for (const id of CONFIG.legs) {
+    const r = legImuRegistry[id];
+    const filteredEl = document.querySelector(`[data-leg-imu-filtered="${id}"]`);
+    if (filteredEl) filteredEl.textContent = r.latestImDisplay ?? "\u2014";
+    const rpEl = document.querySelector(`[data-leg-roll-pitch="${id}"]`);
+    if (rpEl) rpEl.textContent = r.latestRollPitchReadout ?? "\u2014";
+    const rawEl = document.querySelector(`[data-leg-imu-raw="${id}"]`);
+    if (rawEl) rawEl.textContent = r.latestRawDisplay ?? "\u2014";
+
+    const rot = document.querySelector(`[data-leg-stance-rot="${id}"]`);
+    if (rot) {
+      rot.style.setProperty("--leg-roll-num", String(Number.isFinite(r.rollDeg) ? r.rollDeg : 0));
+      rot.style.setProperty("--leg-pitch-num", String(Number.isFinite(r.pitchDeg) ? r.pitchDeg : 0));
+    }
+    const label = document.querySelector(`[data-leg-stance-label="${id}"]`);
+    if (label) {
+      label.textContent = `${id}  r ${Number(r.rollDeg).toFixed(1)}\u00b0  p ${Number(r.pitchDeg).toFixed(1)}\u00b0`;
+    }
+  }
 }
 
 function initGyroTopics() {
   if (!ros) return;
   teardownImuTopics();
 
-  imuDataRosTopic = new ROSLIB.Topic({
-    ros,
-    name: CONFIG.ros.imuDataTopic,
-    messageType: CONFIG.ros.imuMessageType,
-  });
+  const imuType = CONFIG.ros.imuMessageType;
+  const rpType = CONFIG.ros.imuRollPitchMessageType;
 
-  imuDataRosTopic.subscribe((message) => {
-    const fid = message?.header?.frame_id ?? "";
-    const routed = parseImuRoutingFromFrameId(fid);
-    let leg = 0;
-    let imu = 0;
-    let note = null;
-    if (routed) {
-      ({ leg, imu } = routed);
-    } else {
-      note =
-        fid === ""
-          ? "No frame_id; showing under l0 · IMU 0. Name frames like l0_imu1."
-          : `Unrecognized frame_id "${fid}"; showing under l0 · IMU 0.`;
-    }
-    const legKey = CONFIG.legs[leg];
-    const cellKey = `${legKey}-${imu}`;
-    imuPending.set(cellKey, formatImuForDisplay(message, note));
-    if (imuDisplayRaf != null) return;
-    imuDisplayRaf = requestAnimationFrame(flushImuDisplays);
-  });
+  for (const legId of CONFIG.legs) {
+    const paths = legImuTopics[legId];
+    if (!paths) continue;
 
-  console.log("[ros] IMU topic:", {
-    name: CONFIG.ros.imuDataTopic,
-    type: CONFIG.ros.imuMessageType,
-  });
+    const tImu = new ROSLIB.Topic({
+      ros,
+      name: paths.imu,
+      messageType: imuType,
+    });
+    tImu.subscribe((message) => {
+      legImuRegistry[legId].latestImDisplay = formatFilteredImuForDisplay(message, paths.imu);
+      scheduleLegImuUiUpdate();
+    });
+    legImuRosTopics.push(tImu);
+
+    const tRp = new ROSLIB.Topic({
+      ros,
+      name: paths.rollPitch,
+      messageType: rpType,
+    });
+    tRp.subscribe((message) => {
+      const str = message?.data != null ? String(message.data) : "";
+      const parsed = parseRollPitchDegString(str);
+      if (parsed.roll_deg != null && parsed.pitch_deg != null) {
+        const r = legImuRegistry[legId];
+        r.rollDegSensor = parsed.roll_deg;
+        r.pitchDegSensor = parsed.pitch_deg;
+        applyRollPitchDisplayForLeg(legId);
+      } else {
+        legImuRegistry[legId].latestRollPitchReadout = parsed.summary;
+      }
+      scheduleLegImuUiUpdate();
+    });
+    legImuRosTopics.push(tRp);
+
+    const tRaw = new ROSLIB.Topic({
+      ros,
+      name: paths.raw,
+      messageType: imuType,
+    });
+    tRaw.subscribe((message) => {
+      legImuRegistry[legId].latestRawDisplay = formatFilteredImuForDisplay(message, paths.raw);
+      scheduleLegImuUiUpdate();
+    });
+    legImuRosTopics.push(tRaw);
+  }
+
+  scheduleLegImuUiUpdate();
+  console.log("[ros] Per-leg IMU topics", { imuType, rpType, legImuTopics });
 }
 
 
@@ -864,6 +1041,124 @@ function buildCmdPayload() {
 
 function updateCmdPreview() {}
 
+/** Saved command chips (Commands panel); persisted in localStorage. */
+const SAVED_CMDS_STORAGE_KEY = "sam-ui-saved-commands-v1";
+
+function persistSavedCommands() {
+  const container = $("cmd-saved");
+  if (!container) return;
+  const items = [];
+  for (const wrapper of container.querySelectorAll(".cmd-sticky")) {
+    const btn = wrapper.querySelector(".cmd-sticky-btn");
+    if (!btn) continue;
+    const name = (btn.textContent || "").trim();
+    const cmd = btn.dataset.cmd;
+    if (name && typeof cmd === "string" && cmd.length > 0) items.push({ name, cmd });
+  }
+  try {
+    localStorage.setItem(SAVED_CMDS_STORAGE_KEY, JSON.stringify(items));
+  } catch (err) {
+    console.warn("[cmd] Could not persist saved commands", err);
+    logLine("CMD", "Could not write saved commands to browser storage", "error");
+  }
+}
+
+function restoreSavedCommands() {
+  const container = $("cmd-saved");
+  if (!container) return;
+  let raw;
+  try {
+    raw = localStorage.getItem(SAVED_CMDS_STORAGE_KEY);
+  } catch (err) {
+    console.warn("[cmd] localStorage unavailable", err);
+    return;
+  }
+  if (!raw) return;
+  let items;
+  try {
+    items = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (!Array.isArray(items)) return;
+  for (const it of items) {
+    if (!it || typeof it.name !== "string" || typeof it.cmd !== "string") continue;
+    try {
+      JSON.parse(it.cmd);
+    } catch {
+      continue;
+    }
+    installSavedCommandChip(it.name.trim(), it.cmd, false);
+  }
+}
+
+/**
+ * @param {string} name
+ * @param {string} cmdJsonStr
+ * @param {boolean} [doPersist=true]
+ */
+function installSavedCommandChip(name, cmdJsonStr, doPersist = true) {
+  const container = $("cmd-saved");
+  if (!container) return;
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "cmd-sticky";
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "cmd-sticky-btn";
+  btn.textContent = name;
+  btn.dataset.cmd = cmdJsonStr;
+
+  btn.addEventListener("click", () => {
+    let parsed;
+    try {
+      parsed = JSON.parse(btn.dataset.cmd);
+    } catch {
+      logLine("CMD", "Invalid JSON in saved command", "error");
+      return;
+    }
+    if (parsed.allLegs && parsed.type === "move") {
+      const { inner, outer, servo } = parsed;
+      for (const leg of CONFIG.legs) {
+        publishPayload(JSON.stringify({ type: "move", leg_id: leg, inner, outer, servo }));
+      }
+    } else {
+      publishPayload(btn.dataset.cmd);
+    }
+  });
+
+  btn.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    const newJson = prompt("Edit command JSON:", btn.dataset.cmd);
+    if (newJson !== null) {
+      try {
+        JSON.parse(newJson);
+        btn.dataset.cmd = newJson;
+        logLine("CMD", `Updated "${name}": ${newJson}`);
+        persistSavedCommands();
+      } catch {
+        logLine("CMD", "Invalid JSON, not saved", "error");
+      }
+    }
+  });
+
+  const removeBtn = document.createElement("button");
+  removeBtn.type = "button";
+  removeBtn.className = "cmd-sticky-remove";
+  removeBtn.textContent = "\u00d7";
+  removeBtn.title = "Remove";
+  removeBtn.addEventListener("click", () => {
+    wrapper.remove();
+    persistSavedCommands();
+  });
+
+  wrapper.appendChild(btn);
+  wrapper.appendChild(removeBtn);
+  container.appendChild(wrapper);
+  if (doPersist) persistSavedCommands();
+}
+
 const cmdHistory = [];
 let cmdHistoryIdx = -1;
 let cmdHistoryDraft = "";
@@ -909,62 +1204,12 @@ function sendBuiltCommand() {
 function addSavedCommand() {
   const name = prompt("Name for this command:");
   if (!name) return;
+  const nameTrim = name.trim();
+  if (!nameTrim) return;
 
   const payload = buildCmdPayload();
   const json = JSON.stringify(payload);
-  const container = $("cmd-saved");
-
-  const wrapper = document.createElement("div");
-  wrapper.className = "cmd-sticky";
-
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "cmd-sticky-btn";
-  btn.textContent = name;
-  btn.dataset.cmd = json;
-
-  btn.addEventListener("click", () => {
-    let parsed;
-    try {
-      parsed = JSON.parse(btn.dataset.cmd);
-    } catch {
-      logLine("CMD", "Invalid JSON in saved command", "error");
-      return;
-    }
-    if (parsed.allLegs && parsed.type === "move") {
-      const { inner, outer, servo } = parsed;
-      for (const leg of CONFIG.legs) {
-        publishPayload(JSON.stringify({ type: "move", leg_id: leg, inner, outer, servo }));
-      }
-    } else {
-      publishPayload(btn.dataset.cmd);
-    }
-  });
-
-  btn.addEventListener("contextmenu", (e) => {
-    e.preventDefault();
-    const newJson = prompt("Edit command JSON:", btn.dataset.cmd);
-    if (newJson !== null) {
-      try {
-        JSON.parse(newJson);
-        btn.dataset.cmd = newJson;
-        logLine("CMD", `Updated "${name}": ${newJson}`);
-      } catch {
-        logLine("CMD", "Invalid JSON, not saved", "error");
-      }
-    }
-  });
-
-  const removeBtn = document.createElement("button");
-  removeBtn.type = "button";
-  removeBtn.className = "cmd-sticky-remove";
-  removeBtn.textContent = "\u00d7";
-  removeBtn.title = "Remove";
-  removeBtn.addEventListener("click", () => wrapper.remove());
-
-  wrapper.appendChild(btn);
-  wrapper.appendChild(removeBtn);
-  container.appendChild(wrapper);
+  installSavedCommandChip(nameTrim, json);
 }
 
 function setupCommandForm() {
@@ -1039,6 +1284,7 @@ function setupCommandForm() {
   });
 
   buildCmdFields();
+  restoreSavedCommands();
 }
 
 const LEGS = [
@@ -1058,6 +1304,35 @@ function getLegValues(legId) {
     outerVal: outer ? parseFloat(outer.value) || 0 : 0,
     servoVal: servo ? parseFloat(servo.value) || 0 : 0,
   };
+}
+
+/** Roll / pitch (deg) from per-leg `/lN/imu/roll_pitch_deg` — same as Gyro panel. */
+function getImuRollPitchDegForLeg(legKey) {
+  const r = legImuRegistry[legKey];
+  if (!r) return { rollDeg: 0, pitchDeg: 0 };
+  const rollDeg = Number.isFinite(r.rollDeg) ? r.rollDeg : 0;
+  const pitchDeg = Number.isFinite(r.pitchDeg) ? r.pitchDeg : 0;
+  return { rollDeg, pitchDeg };
+}
+
+/** @returns {Record<string, { id: string, inner_stepper: number, outer_stepper: number, hip: number, yaw: number, pitch: number, roll: number }>} */
+function getLegPoseSnapshot() {
+  const snapshot = {};
+  for (const { id } of LEGS) {
+    const key = id.toLowerCase();
+    const base = getLegValues(id);
+    const { rollDeg, pitchDeg } = getImuRollPitchDegForLeg(key);
+    snapshot[key] = {
+      id: key,
+      inner_stepper: base.innerVal,
+      outer_stepper: base.outerVal,
+      hip: 0,
+      yaw: 0,
+      pitch: pitchDeg,
+      roll: rollDeg,
+    };
+  }
+  return snapshot;
 }
 
 function sendLegState(legId) {
@@ -1148,7 +1423,7 @@ function buildStepperGrid() {
   });
 }
 
-function buildInputRow(legId, type, label) {
+function buildInputRow(legId, type, label, opts = {}) {
   const row = document.createElement("div");
   row.className = "stepper-row";
 
@@ -1159,10 +1434,12 @@ function buildInputRow(legId, type, label) {
 
   const input = document.createElement("input");
   input.type = "number";
-  input.step = type === "servo" ? "1" : "0.01";
+  input.step =
+    opts.step != null ? opts.step : type === "servo" ? "1" : "0.01";
   input.value = "0";
   input.id = `${type}-${legId}`;
   input.setAttribute("aria-label", `${legId} ${label}`);
+  if (opts.title) input.title = opts.title;
   input.addEventListener("focus", () => input.select());
 
   input.addEventListener("keydown", (e) => {
@@ -1304,7 +1581,7 @@ function placeConsolePanel(panel, force = false) {
   }
   if (terminalPanelMoved && !force) return;
 
-  const panelWidth = Math.min(1400, Math.floor(window.innerWidth * 0.94));
+  const panelWidth = Math.min(980, Math.floor(window.innerWidth * 0.94 * 0.7));
   const panelHeight = Math.min(950, Math.floor(window.innerHeight * 0.88));
   const left = Math.max(12, Math.floor((window.innerWidth - panelWidth) / 2));
   const top = Math.max(12, Math.floor((window.innerHeight - panelHeight) / 2));
@@ -1992,8 +2269,16 @@ window.addEventListener("DOMContentLoaded", () => {
   setupPanelLauncher();
   setupCommandForm();
   setupTestingControls();
+  initRobotRenderUI({
+    panel: $("robot-render-panel"),
+    getPose: getLegPoseSnapshot,
+  });
   setupTerminalForm();
   setupTrajectoryPanel();
+  const gyroZeroRollPitchBtn = $("gyro-zero-roll-pitch-btn");
+  if (gyroZeroRollPitchBtn) {
+    gyroZeroRollPitchBtn.addEventListener("click", zeroImuRollPitchDisplay);
+  }
   setupInitialFocus();
 
   // Make all panels with drag handles draggable
@@ -2040,18 +2325,23 @@ window.addEventListener("DOMContentLoaded", () => {
       startBtn.hidden = true;
     });
   }
-  document.addEventListener("keydown", (e) => {
-    if (e.key !== "`" && e.key !== "Backquote") return;
-    const tag = e.target?.tagName;
-    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || e.target?.isContentEditable) return;
-    e.preventDefault();
-    publishPayload(E_STOP_PAYLOAD);
-    estopBtn?.focus();
-  });
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key !== "`" && e.key !== "Backquote") return;
+      if (e.repeat) return;
+      e.preventDefault();
+      e.stopPropagation();
+      publishPayload(E_STOP_PAYLOAD);
+      startBtn?.removeAttribute("hidden");
+      estopBtn?.focus();
+    },
+    true
+  );
 
   logLine("INFO", "S.A.M. Control Interface ready");
   logLine(
     "HINT",
-    "Keyboard hints: ` = E-Stop, Tab to move, Space/Enter to activate, Alt+S = command preset, Alt+C = command line. In stepper fields, Enter sends velocity."
+    "Keyboard hints: ` = E-Stop (always, including over inputs and terminal), Tab to move, Space/Enter to activate, Alt+S = command preset, Alt+C = command line. In stepper fields, Enter sends velocity."
   );
 });

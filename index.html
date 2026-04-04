@@ -190,7 +190,11 @@
         <div class="panel-drag-handle" data-drag-panel="testing-panel">
           <h2>Testing</h2>
         </div>
-        <p class="hint">Set target velocity and press Enter to send.</p>
+        <p class="hint">
+          Press Enter or <strong>Set</strong> to publish inner / outer / servo to ROS. The
+          <strong>Render</strong> panel uses IMU <strong>roll</strong> and <strong>pitch</strong> from
+          <strong>Gyro</strong> (<code>/lN/imu/roll_pitch_deg</code>).
+        </p>
 
         <div class="stepper-grid" id="stepper-grid">
           <!-- Rows injected by app.js -->
@@ -258,64 +262,119 @@
           <h2>Gyro</h2>
         </div>
         <p class="hint">
-          <code>/imu/data</code> (<code>sensor_msgs/Imu</code>). Two IMUs per leg (8 cells). Messages are
-          routed by <code>header.frame_id</code> when it contains leg and IMU index (for example
-          <code>l2_imu1</code>); otherwise the sample is shown under leg l0 · IMU 0 with a note.
+          Each leg has its own filtered <code>/lN/imu/data</code> (<code>sensor_msgs/Imu</code>) and compact
+          <code>/lN/imu/roll_pitch_deg</code> (<code>std_msgs/String</code>, e.g.
+          <code>roll_deg=12.34,pitch_deg=-5.67</code>). Debug unfiltered: <code>/lN/imu/data_raw</code> below.
         </p>
-        <div class="gyro-leg-stack" role="group" aria-label="IMU streams per leg">
-          <div class="leg-card gyro-leg-block">
-            <div class="leg-heading">Leg l0</div>
-            <div class="gyro-imu-pair">
-              <div class="gyro-imu-cell">
-                <div class="gyro-imu-label">IMU 0</div>
-                <pre class="trajectory-pre gyro-pre" data-gyro-cell="l0-0" tabindex="0">—</pre>
+
+        <div class="gyro-panel-actions">
+          <button
+            type="button"
+            id="gyro-zero-roll-pitch-btn"
+            class="gyro-zero-roll-pitch-btn"
+            title="Use each leg’s current roll/pitch as 0° for display, prisms, and 3D Render"
+          >
+            Zero roll / pitch (home)
+          </button>
+        </div>
+        <p class="hint gyro-zero-ref-hint">
+          <strong>Zero roll / pitch</strong> only updates the UI reference; it does not command the robot or
+          change IMU firmware calibration.
+        </p>
+
+        <div class="leg-imu-grid" role="group" aria-label="Per-leg IMU">
+          <article class="leg-imu-card" data-leg-key="l0">
+            <h3 class="leg-imu-card-title">L0 IMU</h3>
+            <div class="gyro-block-label"><code>/l0/imu/roll_pitch_deg</code></div>
+            <div class="imu-readout imu-readout-compact" data-leg-roll-pitch="l0" role="status">—</div>
+            <div class="gyro-block-label"><code>/l0/imu/data</code></div>
+            <pre class="trajectory-pre gyro-leg-imu-pre" data-leg-imu-filtered="l0" tabindex="0">—</pre>
+          </article>
+          <article class="leg-imu-card" data-leg-key="l1">
+            <h3 class="leg-imu-card-title">L1 IMU</h3>
+            <div class="gyro-block-label"><code>/l1/imu/roll_pitch_deg</code></div>
+            <div class="imu-readout imu-readout-compact" data-leg-roll-pitch="l1" role="status">—</div>
+            <div class="gyro-block-label"><code>/l1/imu/data</code></div>
+            <pre class="trajectory-pre gyro-leg-imu-pre" data-leg-imu-filtered="l1" tabindex="0">—</pre>
+          </article>
+          <article class="leg-imu-card" data-leg-key="l2">
+            <h3 class="leg-imu-card-title">L2 IMU</h3>
+            <div class="gyro-block-label"><code>/l2/imu/roll_pitch_deg</code></div>
+            <div class="imu-readout imu-readout-compact" data-leg-roll-pitch="l2" role="status">—</div>
+            <div class="gyro-block-label"><code>/l2/imu/data</code></div>
+            <pre class="trajectory-pre gyro-leg-imu-pre" data-leg-imu-filtered="l2" tabindex="0">—</pre>
+          </article>
+          <article class="leg-imu-card" data-leg-key="l3">
+            <h3 class="leg-imu-card-title">L3 IMU</h3>
+            <div class="gyro-block-label"><code>/l3/imu/roll_pitch_deg</code></div>
+            <div class="imu-readout imu-readout-compact" data-leg-roll-pitch="l3" role="status">—</div>
+            <div class="gyro-block-label"><code>/l3/imu/data</code></div>
+            <pre class="trajectory-pre gyro-leg-imu-pre" data-leg-imu-filtered="l3" tabindex="0">—</pre>
+          </article>
+        </div>
+
+        <div class="leg-stance-viz" aria-label="Per-leg attitude prisms">
+          <div class="gyro-block-label">
+            Leg prisms <span class="leg-stance-join-note">(joined at 75% stage height)</span>
+          </div>
+          <p class="hint leg-stance-hint">
+            Driven by each leg&rsquo;s <code>/lN/imu/roll_pitch_deg</code> roll/pitch (same as the cards above).
+          </p>
+          <div class="leg-stance-stage">
+            <div class="leg-stance-world">
+              <div class="leg-stance-hub" title="Common joint: 75% up from the foot plane"></div>
+              <div class="leg-stance-arm" data-leg-stance="l0">
+                <div class="leg-stance-rot" data-leg-stance-rot="l0">
+                  <div class="leg-stance-prism" aria-hidden="true"></div>
+                </div>
               </div>
-              <div class="gyro-imu-cell">
-                <div class="gyro-imu-label">IMU 1</div>
-                <pre class="trajectory-pre gyro-pre" data-gyro-cell="l0-1" tabindex="0">—</pre>
+              <div class="leg-stance-arm" data-leg-stance="l1">
+                <div class="leg-stance-rot" data-leg-stance-rot="l1">
+                  <div class="leg-stance-prism" aria-hidden="true"></div>
+                </div>
               </div>
+              <div class="leg-stance-arm" data-leg-stance="l2">
+                <div class="leg-stance-rot" data-leg-stance-rot="l2">
+                  <div class="leg-stance-prism" aria-hidden="true"></div>
+                </div>
+              </div>
+              <div class="leg-stance-arm" data-leg-stance="l3">
+                <div class="leg-stance-rot" data-leg-stance-rot="l3">
+                  <div class="leg-stance-prism" aria-hidden="true"></div>
+                </div>
+              </div>
+              <div class="leg-stance-ground" aria-hidden="true"></div>
             </div>
           </div>
-          <div class="leg-card gyro-leg-block">
-            <div class="leg-heading">Leg l1</div>
-            <div class="gyro-imu-pair">
-              <div class="gyro-imu-cell">
-                <div class="gyro-imu-label">IMU 0</div>
-                <pre class="trajectory-pre gyro-pre" data-gyro-cell="l1-0" tabindex="0">—</pre>
-              </div>
-              <div class="gyro-imu-cell">
-                <div class="gyro-imu-label">IMU 1</div>
-                <pre class="trajectory-pre gyro-pre" data-gyro-cell="l1-1" tabindex="0">—</pre>
-              </div>
-            </div>
-          </div>
-          <div class="leg-card gyro-leg-block">
-            <div class="leg-heading">Leg l2</div>
-            <div class="gyro-imu-pair">
-              <div class="gyro-imu-cell">
-                <div class="gyro-imu-label">IMU 0</div>
-                <pre class="trajectory-pre gyro-pre" data-gyro-cell="l2-0" tabindex="0">—</pre>
-              </div>
-              <div class="gyro-imu-cell">
-                <div class="gyro-imu-label">IMU 1</div>
-                <pre class="trajectory-pre gyro-pre" data-gyro-cell="l2-1" tabindex="0">—</pre>
-              </div>
-            </div>
-          </div>
-          <div class="leg-card gyro-leg-block">
-            <div class="leg-heading">Leg l3</div>
-            <div class="gyro-imu-pair">
-              <div class="gyro-imu-cell">
-                <div class="gyro-imu-label">IMU 0</div>
-                <pre class="trajectory-pre gyro-pre" data-gyro-cell="l3-0" tabindex="0">—</pre>
-              </div>
-              <div class="gyro-imu-cell">
-                <div class="gyro-imu-label">IMU 1</div>
-                <pre class="trajectory-pre gyro-pre" data-gyro-cell="l3-1" tabindex="0">—</pre>
-              </div>
-            </div>
+          <div class="leg-stance-legend" role="list">
+            <span class="leg-stance-legend-item" data-leg-stance-label="l0" role="listitem">l0 r 0.0° p 0.0°</span>
+            <span class="leg-stance-legend-item" data-leg-stance-label="l1" role="listitem">l1 r 0.0° p 0.0°</span>
+            <span class="leg-stance-legend-item" data-leg-stance-label="l2" role="listitem">l2 r 0.0° p 0.0°</span>
+            <span class="leg-stance-legend-item" data-leg-stance-label="l3" role="listitem">l3 r 0.0° p 0.0°</span>
           </div>
         </div>
+
+        <details class="imu-debug-details">
+          <summary>Debug: per-leg <code>/lN/imu/data_raw</code> (<code>sensor_msgs/Imu</code>)</summary>
+          <div class="gyro-debug-inner leg-imu-debug-grid">
+            <div>
+              <div class="gyro-block-label">L0 — <code>/l0/imu/data_raw</code></div>
+              <pre class="trajectory-pre gyro-debug-pre" data-leg-imu-raw="l0" tabindex="0">—</pre>
+            </div>
+            <div>
+              <div class="gyro-block-label">L1 — <code>/l1/imu/data_raw</code></div>
+              <pre class="trajectory-pre gyro-debug-pre" data-leg-imu-raw="l1" tabindex="0">—</pre>
+            </div>
+            <div>
+              <div class="gyro-block-label">L2 — <code>/l2/imu/data_raw</code></div>
+              <pre class="trajectory-pre gyro-debug-pre" data-leg-imu-raw="l2" tabindex="0">—</pre>
+            </div>
+            <div>
+              <div class="gyro-block-label">L3 — <code>/l3/imu/data_raw</code></div>
+              <pre class="trajectory-pre gyro-debug-pre" data-leg-imu-raw="l3" tabindex="0">—</pre>
+            </div>
+          </div>
+        </details>
       </section>
 
       <section
@@ -393,10 +452,58 @@
         ></div>
       </section>
 
+      <section
+        id="robot-render-panel"
+        class="quick-panel robot-render-panel"
+        aria-label="Leg 3D render"
+        hidden
+      >
+        <div
+          class="panel-drag-handle robot-render-panel-head"
+          data-drag-panel="robot-render-panel"
+        >
+          <h2 id="robot-render-title">Leg 3D render</h2>
+          <div class="robot-render-toolbar-right">
+            <fieldset class="robot-render-layout-fieldset">
+              <legend class="robot-render-legend">Layout</legend>
+              <label class="robot-render-radio-label">
+                <input type="radio" name="robot-render-layout" value="parallel" checked />
+                Parallel
+              </label>
+              <label class="robot-render-radio-label">
+                <input type="radio" name="robot-render-layout" value="spread" />
+                Spread
+              </label>
+            </fieldset>
+            <button type="button" id="robot-render-close-btn" class="robot-render-close-btn">
+              Close
+            </button>
+          </div>
+        </div>
+        <div
+          id="robot-render-canvas-wrap"
+          class="robot-render-canvas-wrap"
+          aria-label="Three.js canvas"
+        ></div>
+        <div class="robot-render-legend-bar" role="list">
+          <span class="robot-render-swatch l0" role="listitem">l0</span>
+          <span class="robot-render-swatch l1" role="listitem">l1</span>
+          <span class="robot-render-swatch l2" role="listitem">l2</span>
+          <span class="robot-render-swatch l3" role="listitem">l3</span>
+        </div>
+        <p class="hint robot-render-hint">
+          Orbit: drag to rotate, scroll to zoom.
+          <strong>Roll</strong> and <strong>pitch</strong> follow each leg&rsquo;s IMU
+          (<code>/lN/imu/roll_pitch_deg</code>, same as Gyro). Stepper targets follow
+          <strong>Testing</strong>. Prisms meet at ~75% leg height.
+        </p>
+      </section>
+
       <aside class="panel-launcher" aria-label="Panel launcher">
         <button type="button" data-panel-target="commands-panel">Commands</button>
         <button type="button" data-panel-target="device-panel">Devices</button>
         <button type="button" data-panel-target="terminal-panel">Console</button>
+        <button type="button" data-panel-target="robot-render-panel">Render</button>
         <button type="button" data-panel-target="testing-panel">Testing</button>
         <button type="button" data-panel-target="trajectory-panel">Trajectory</button>
         <button type="button" data-panel-target="gyro-panel">Gyro</button>
