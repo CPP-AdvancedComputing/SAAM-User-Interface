@@ -510,6 +510,32 @@
         <button type="button" data-panel-target="load-panel">Load</button>
         <button type="button" data-panel-target="planner-status-panel">Status</button>
         <button type="button" data-panel-target="log-panel">Log</button>
+        <div class="panel-launcher-layout" role="group" aria-label="Saved layout">
+          <span class="panel-launcher-layout-label">Layout</span>
+          <button
+            type="button"
+            id="ui-layout-export-btn"
+            title="Download panel layout and open panels as JSON"
+          >
+            Export
+          </button>
+          <button
+            type="button"
+            id="ui-layout-import-btn"
+            title="Load layout from a JSON file"
+          >
+            Import
+          </button>
+          <input
+            type="file"
+            id="ui-layout-import-input"
+            accept="application/json,.json"
+            hidden
+          />
+          <button type="button" id="ui-layout-reset-btn" class="ui-layout-reset-btn" title="Close all panels">
+            Reset UI
+          </button>
+        </div>
       </aside>
     </main>
   </body>

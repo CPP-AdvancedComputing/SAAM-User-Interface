@@ -1472,10 +1472,267 @@ function setupTestingControls() {
 
 let panelZCounter = 26;
 
+const UI_LAYOUT_STORAGE_KEY = "sam-ui-layout-v1";
+let layoutSaveTimer = 0;
+
+function scheduleSaveUILayout() {
+  clearTimeout(layoutSaveTimer);
+  layoutSaveTimer = window.setTimeout(() => {
+    try {
+      localStorage.setItem(UI_LAYOUT_STORAGE_KEY, JSON.stringify(buildUILayoutState()));
+    } catch (_err) {
+      // quota or private mode
+    }
+  }, 150);
+}
+
+/** @param {HTMLElement} panel */
+function snapshotPanelLayout(panel) {
+  return {
+    hidden: panel.hidden,
+    left: panel.style.left || "",
+    top: panel.style.top || "",
+    right: panel.style.right || "",
+    bottom: panel.style.bottom || "",
+    zIndex: panel.style.zIndex || "",
+    placed: panel.dataset.placed === "1",
+  };
+}
+
+function buildUILayoutState() {
+  /** @type {Record<string, ReturnType<typeof snapshotPanelLayout>>} */
+  const panels = {};
+  document.querySelectorAll(".quick-panel").forEach((el) => {
+    if (!(el instanceof HTMLElement) || !el.id) return;
+    panels[el.id] = snapshotPanelLayout(el);
+  });
+  const layoutRadio = document.querySelector('input[name="robot-render-layout"]:checked');
+  return {
+    version: 1,
+    savedAt: new Date().toISOString(),
+    terminalPanelMoved,
+    robotRenderLayout: layoutRadio?.value === "spread" ? "spread" : "parallel",
+    panels,
+  };
+}
+
+/** @param {HTMLElement} panel */
+function clearPanelPositionStyles(panel) {
+  panel.style.left = "";
+  panel.style.top = "";
+  panel.style.right = "";
+  panel.style.bottom = "";
+  panel.style.transform = "";
+  panel.style.zIndex = "";
+  delete panel.dataset.placed;
+}
+
+/**
+ * @param {HTMLElement} panel
+ * @param {Partial<ReturnType<typeof snapshotPanelLayout>> | null | undefined} snap
+ */
+function applyPanelSnapshotStyles(panel, snap) {
+  if (!snap || typeof snap !== "object") return;
+  panel.style.left = typeof snap.left === "string" ? snap.left : "";
+  panel.style.top = typeof snap.top === "string" ? snap.top : "";
+  panel.style.right = typeof snap.right === "string" ? snap.right : "";
+  panel.style.bottom = typeof snap.bottom === "string" ? snap.bottom : "";
+  panel.style.transform = "";
+  if (typeof snap.zIndex === "string" && snap.zIndex) panel.style.zIndex = snap.zIndex;
+  else panel.style.zIndex = "";
+  if (snap.placed) panel.dataset.placed = "1";
+  else delete panel.dataset.placed;
+}
+
+function syncLauncherButtonsToPanels() {
+  document.querySelectorAll("[data-panel-target]").forEach((btn) => {
+    const id = btn.getAttribute("data-panel-target");
+    const panel = id ? $(id) : null;
+    if (panel) btn.setAttribute("aria-expanded", String(!panel.hidden));
+  });
+}
+
+function recomputePanelZCounterFromDom() {
+  let maxZ = 26;
+  document.querySelectorAll(".quick-panel").forEach((el) => {
+    const z = Number.parseInt(el.style.zIndex, 10);
+    if (!Number.isNaN(z)) maxZ = Math.max(maxZ, z);
+  });
+  panelZCounter = maxZ;
+}
+
+/**
+ * @param {unknown} raw
+ * @returns {raw is { version: number; panels: Record<string, ReturnType<typeof snapshotPanelLayout>>; terminalPanelMoved?: boolean; robotRenderLayout?: string }}
+ */
+function isValidUILayoutState(raw) {
+  if (!raw || typeof raw !== "object") return false;
+  const o = /** @type {Record<string, unknown>} */ (raw);
+  if (o.version !== 1 || !o.panels || typeof o.panels !== "object") return false;
+  return true;
+}
+
+/** @param {ReturnType<typeof buildUILayoutState>} state */
+function applyUILayoutState(state) {
+  if (!isValidUILayoutState(state)) return false;
+  const wide = window.innerWidth > 1100;
+  terminalPanelMoved = wide && !!state.terminalPanelMoved;
+
+  for (const [id, snap] of Object.entries(state.panels)) {
+    const panel = $(id);
+    if (!(panel instanceof HTMLElement)) continue;
+    if (!snap || typeof snap !== "object") continue;
+    panel.hidden = !!snap.hidden;
+    if (wide) applyPanelSnapshotStyles(panel, snap);
+    else clearPanelPositionStyles(panel);
+  }
+
+  const parallel = document.querySelector('input[name="robot-render-layout"][value="parallel"]');
+  const spread = document.querySelector('input[name="robot-render-layout"][value="spread"]');
+  const wantSpread = state.robotRenderLayout === "spread";
+  if (spread instanceof HTMLInputElement && parallel instanceof HTMLInputElement) {
+    const currentlySpread = spread.checked;
+    if (wantSpread !== currentlySpread) {
+      if (wantSpread) {
+        spread.checked = true;
+        spread.dispatchEvent(new Event("change", { bubbles: true }));
+      } else {
+        parallel.checked = true;
+        parallel.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    }
+  }
+
+  syncLauncherButtonsToPanels();
+  recomputePanelZCounterFromDom();
+
+  const termPanel = $("terminal-panel");
+  if (wide && termPanel && !termPanel.hidden) {
+    window.setTimeout(() => {
+      getActiveTab()?.fitAddon?.fit();
+      getActiveTab()?.term?.focus();
+    }, 50);
+  }
+  return true;
+}
+
+function restoreUILayoutFromStorage() {
+  try {
+    const raw = localStorage.getItem(UI_LAYOUT_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    applyUILayoutState(parsed);
+  } catch (_err) {
+    // ignore corrupt storage
+  }
+}
+
+function resetUILayoutToBlankSlate() {
+  document.querySelectorAll(".quick-panel").forEach((el) => {
+    if (!(el instanceof HTMLElement)) return;
+    el.hidden = true;
+    clearPanelPositionStyles(el);
+  });
+  terminalPanelMoved = false;
+  panelZCounter = 26;
+  syncLauncherButtonsToPanels();
+
+  const parallel = document.querySelector('input[name="robot-render-layout"][value="parallel"]');
+  if (parallel instanceof HTMLInputElement) {
+    parallel.checked = true;
+    parallel.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  try {
+    localStorage.removeItem(UI_LAYOUT_STORAGE_KEY);
+  } catch (_err) {
+    // ignore
+  }
+  scheduleSaveUILayout();
+}
+
+function downloadUILayoutFile() {
+  const state = buildUILayoutState();
+  const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  a.href = url;
+  a.download = `sam-ui-layout-${stamp}.json`;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function setupUILayoutPersistence() {
+  document.querySelectorAll(".quick-panel").forEach((panel) => {
+    const mo = new MutationObserver(() => scheduleSaveUILayout());
+    mo.observe(panel, { attributes: true, attributeFilter: ["hidden"] });
+  });
+
+  document.querySelectorAll('input[name="robot-render-layout"]').forEach((radio) => {
+    radio.addEventListener("change", () => scheduleSaveUILayout());
+  });
+
+  const exportBtn = $("ui-layout-export-btn");
+  exportBtn?.addEventListener("click", () => {
+    downloadUILayoutFile();
+    logLine("INFO", "UI layout exported to file");
+  });
+
+  const importInput = $("ui-layout-import-input");
+  const importBtn = $("ui-layout-import-btn");
+  importBtn?.addEventListener("click", () => importInput?.click());
+  importInput?.addEventListener("change", () => {
+    const file = importInput.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result || ""));
+        if (!applyUILayoutState(parsed)) {
+          logLine("ERROR", "Invalid layout file (expected version 1)");
+          return;
+        }
+        try {
+          localStorage.setItem(UI_LAYOUT_STORAGE_KEY, JSON.stringify(buildUILayoutState()));
+        } catch (_err) {
+          // still applied
+        }
+        logLine("INFO", "UI layout imported from file");
+      } catch (_err) {
+        logLine("ERROR", "Could not read layout file");
+      }
+      importInput.value = "";
+    };
+    reader.readAsText(file);
+  });
+
+  const resetBtn = $("ui-layout-reset-btn");
+  resetBtn?.addEventListener("click", () => {
+    if (
+      !window.confirm(
+        "Close all panels and clear saved positions? This cannot be undone except by re-arranging."
+      )
+    ) {
+      return;
+    }
+    resetUILayoutToBlankSlate();
+    logLine("INFO", "UI reset to blank slate (all panels closed)");
+  });
+
+  window.addEventListener("resize", () => {
+    if (window.innerWidth > 1100) scheduleSaveUILayout();
+  });
+}
+
 function bringPanelToFront(panel) {
   if (!(panel instanceof HTMLElement)) return;
   panelZCounter++;
   panel.style.zIndex = String(panelZCounter);
+  scheduleSaveUILayout();
 }
 
 function placePanel(panel) {
@@ -1557,6 +1814,7 @@ function setupDraggablePanel(panel, handle) {
     }
     if (dx !== 0 || dy !== 0) {
       commitPosition();
+      scheduleSaveUILayout();
     }
     try {
       handle.releasePointerCapture(e.pointerId);
@@ -1660,6 +1918,7 @@ function setupDraggableConsolePanel() {
     }
     if (dx !== 0 || dy !== 0) {
       commitPosition();
+      scheduleSaveUILayout();
     }
     try {
       handle.releasePointerCapture(e.pointerId);
@@ -2339,9 +2598,13 @@ window.addEventListener("DOMContentLoaded", () => {
     true
   );
 
+  restoreUILayoutFromStorage();
+
   logLine("INFO", "S.A.M. Control Interface ready");
   logLine(
     "HINT",
     "Keyboard hints: ` = E-Stop (always, including over inputs and terminal), Tab to move, Space/Enter to activate, Alt+S = command preset, Alt+C = command line. In stepper fields, Enter sends velocity."
   );
+
+  setupUILayoutPersistence();
 });

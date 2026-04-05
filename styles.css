@@ -348,6 +348,32 @@ body:focus-visible {
   border-color: rgba(129, 140, 248, 1);
 }
 
+.panel-launcher-layout {
+  margin-top: 10px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(51, 65, 85, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.panel-launcher-layout-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted, #94a3b8);
+}
+
+.ui-layout-reset-btn {
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #fecaca;
+}
+
+.ui-layout-reset-btn:hover {
+  border-color: rgba(248, 113, 113, 0.85);
+  background: rgba(127, 29, 29, 0.35);
+}
+
 .quick-panel {
   position: fixed;
   right: 106px;
