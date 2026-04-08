@@ -98,8 +98,8 @@
         });
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-BxbhAYuC.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CfAs60br.css">
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="app.js"></script>
   </head>
   <body>
     <header class="app-header">
@@ -565,17 +565,6 @@
         >
           <h2 id="robot-render-title">Leg 3D render</h2>
           <div class="robot-render-toolbar-right">
-            <fieldset class="robot-render-layout-fieldset">
-              <legend class="robot-render-legend">Layout</legend>
-              <label class="robot-render-radio-label">
-                <input type="radio" name="robot-render-layout" value="parallel" checked />
-                Parallel
-              </label>
-              <label class="robot-render-radio-label">
-                <input type="radio" name="robot-render-layout" value="spread" />
-                Spread
-              </label>
-            </fieldset>
             <button
               type="button"
               id="robot-render-fullscreen-btn"
@@ -600,12 +589,6 @@
           <span class="robot-render-swatch l2" role="listitem">l2</span>
           <span class="robot-render-swatch l3" role="listitem">l3</span>
         </div>
-        <p class="hint robot-render-hint">
-          Orbit: drag to rotate, scroll to zoom.
-          <strong>Roll</strong> and <strong>pitch</strong> follow each leg&rsquo;s IMU
-          (<code>/lN/imu/roll_pitch_deg</code>, same as Gyro). Stepper targets follow
-          <strong>Testing</strong>. Prisms meet at ~75% leg height.
-        </p>
       </section>
 
       <aside class="panel-launcher" aria-label="Panel launcher">

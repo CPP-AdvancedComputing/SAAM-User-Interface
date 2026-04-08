@@ -4,8 +4,102 @@
     <meta charset="UTF-8" />
     <title>S.A.M. Control Interface</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <script type="module" crossorigin src="/assets/index-BxbhAYuC.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CfAs60br.css">
+    <style>
+      body.autostart-render-mode {
+        margin: 0;
+        overflow: hidden;
+        background: #05070b;
+      }
+
+      body.autostart-render-mode .app-header,
+      body.autostart-render-mode .panel-launcher,
+      body.autostart-render-mode .quick-panel:not(#robot-render-panel) {
+        display: none !important;
+      }
+
+      body.autostart-render-mode .layout {
+        min-height: 100vh;
+        padding: 0 !important;
+      }
+
+      body.autostart-render-mode #robot-render-panel {
+        position: fixed !important;
+        inset: 0 !important;
+        display: flex !important;
+        flex-direction: column;
+        width: 100vw !important;
+        height: 100vh !important;
+        max-width: none !important;
+        max-height: none !important;
+        margin: 0 !important;
+        border-radius: 0 !important;
+        z-index: 9999 !important;
+      }
+
+      body.autostart-render-mode #robot-render-panel .robot-render-toolbar-right,
+      body.autostart-render-mode #robot-render-panel .robot-render-hint {
+        display: none !important;
+      }
+
+      body.autostart-render-mode #robot-render-panel .robot-render-panel-head.panel-drag-handle {
+        margin-bottom: 0;
+        padding-bottom: 8px;
+      }
+
+      body.autostart-render-mode #robot-render-canvas-wrap {
+        flex: 1 1 auto;
+        min-height: 0;
+        height: calc(100vh - 82px) !important;
+      }
+
+      body.autostart-render-mode .robot-render-close-btn {
+        display: none !important;
+      }
+    </style>
+    <script>
+      (() => {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get("autostart") !== "render") {
+          return;
+        }
+
+        function openRenderAutostartMode() {
+          document.body.classList.add("autostart-render-mode");
+
+          const panel = document.getElementById("robot-render-panel");
+          const launcher = document.querySelector('[data-panel-target="robot-render-panel"]');
+          const fullscreenBtn = document.getElementById("robot-render-fullscreen-btn");
+
+          if (fullscreenBtn instanceof HTMLButtonElement) {
+            fullscreenBtn.textContent = "Exit fullscreen";
+            fullscreenBtn.setAttribute("aria-pressed", "true");
+          }
+
+          window.setTimeout(() => {
+            if (!(panel instanceof HTMLElement) || !(launcher instanceof HTMLButtonElement)) {
+              return;
+            }
+
+            if (panel.hidden) {
+              launcher.click();
+            } else {
+              panel.hidden = true;
+              window.setTimeout(() => launcher.click(), 60);
+            }
+
+            launcher.setAttribute("aria-expanded", "true");
+            window.setTimeout(() => window.dispatchEvent(new Event("resize")), 120);
+            window.setTimeout(() => window.dispatchEvent(new Event("resize")), 800);
+          }, 400);
+        }
+
+        window.addEventListener("DOMContentLoaded", openRenderAutostartMode, {
+          once: true,
+        });
+      })();
+    </script>
+    <script type="module" crossorigin src="/assets/index-Cw4XiR6O.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CyodjzY0.css">
   </head>
   <body>
     <header class="app-header">
@@ -471,17 +565,6 @@
         >
           <h2 id="robot-render-title">Leg 3D render</h2>
           <div class="robot-render-toolbar-right">
-            <fieldset class="robot-render-layout-fieldset">
-              <legend class="robot-render-legend">Layout</legend>
-              <label class="robot-render-radio-label">
-                <input type="radio" name="robot-render-layout" value="parallel" checked />
-                Parallel
-              </label>
-              <label class="robot-render-radio-label">
-                <input type="radio" name="robot-render-layout" value="spread" />
-                Spread
-              </label>
-            </fieldset>
             <button
               type="button"
               id="robot-render-fullscreen-btn"
@@ -506,12 +589,6 @@
           <span class="robot-render-swatch l2" role="listitem">l2</span>
           <span class="robot-render-swatch l3" role="listitem">l3</span>
         </div>
-        <p class="hint robot-render-hint">
-          Orbit: drag to rotate, scroll to zoom.
-          <strong>Roll</strong> and <strong>pitch</strong> follow each leg&rsquo;s IMU
-          (<code>/lN/imu/roll_pitch_deg</code>, same as Gyro). Stepper targets follow
-          <strong>Testing</strong>. Prisms meet at ~75% leg height.
-        </p>
       </section>
 
       <aside class="panel-launcher" aria-label="Panel launcher">

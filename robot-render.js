@@ -37,8 +37,6 @@ export function initRobotRenderUI({ panel, getPose }) {
   const wrap = panel.querySelector("#robot-render-canvas-wrap");
   const closeBtn = panel.querySelector("#robot-render-close-btn");
   const fullscreenBtn = panel.querySelector("#robot-render-fullscreen-btn");
-  /** @type {HTMLInputElement[]} */
-  const layoutRadios = Array.from(panel.querySelectorAll('input[name="robot-render-layout"]'));
 
   if (!wrap) return;
 
@@ -84,14 +82,9 @@ export function initRobotRenderUI({ panel, getPose }) {
     return { legRoot, baseYaw, hipG, yawG, pitchG, rollG, extG };
   }
 
-  function getLayoutMode() {
-    const checked = layoutRadios.find((r) => r.checked);
-    return checked?.value === "spread" ? "spread" : "parallel";
-  }
-
   function applyLayout() {
     if (!legEntries) return;
-    const mode = getLayoutMode();
+    const mode = "parallel";
     legEntries.forEach((e, i) => {
       if (mode === "spread") {
         e.legRoot.position.set(0, 0, 0);
@@ -282,6 +275,4 @@ export function initRobotRenderUI({ panel, getPose }) {
     const launcherBtn = document.querySelector('[data-panel-target="robot-render-panel"]');
     if (launcherBtn) launcherBtn.setAttribute("aria-expanded", "false");
   });
-
-  layoutRadios.forEach((r) => r.addEventListener("change", applyLayout));
 }

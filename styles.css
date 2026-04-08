@@ -1828,34 +1828,6 @@ body.dragging-panel {
   gap: 14px;
 }
 
-.robot-render-layout-fieldset {
-  margin: 0;
-  padding: 6px 12px;
-  border: 1px solid rgba(51, 65, 85, 0.65);
-  border-radius: var(--radius-md);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  align-items: center;
-}
-
-.robot-render-legend {
-  padding: 0 8px 0 0;
-  font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-muted);
-}
-
-.robot-render-radio-label {
-  font-size: 0.85rem;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  color: var(--text-primary);
-}
-
 .robot-render-close-btn {
   padding: 6px 14px;
   border-radius: var(--radius-pill);
