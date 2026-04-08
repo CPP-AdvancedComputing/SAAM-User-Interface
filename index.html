@@ -62,6 +62,13 @@
         <div id="ros-meta-panel" class="ros-meta-panel" hidden>
           <span class="ros-endpoint-label">ROS bridge</span>
           <span id="ros-endpoint-value">ws://10.12.64.222:9090</span>
+          <label class="ros-bridge-picker" for="ros-bridge-select">
+            Bridge IP
+            <select id="ros-bridge-select" aria-label="Select ROS bridge IP">
+              <option value="ws://10.12.64.222:9090">10.12.64.222</option>
+              <option value="ws://10.42.0.1:9090">10.42.0.1</option>
+            </select>
+          </label>
         </div>
       </section>
     </header>

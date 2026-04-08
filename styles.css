@@ -118,6 +118,22 @@ body:focus-visible {
   box-shadow: var(--shadow-soft);
 }
 
+.ros-bridge-picker {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.72rem;
+  color: rgba(148, 163, 184, 0.85);
+}
+
+.ros-bridge-picker select {
+  min-width: 150px;
+  font-size: 0.8rem;
+  padding: 4px 8px;
+}
+
 .ros-endpoint {
   display: flex;
   flex-direction: column;
@@ -1025,6 +1041,24 @@ body:focus-visible {
   user-select: none;
   padding-bottom: 6px;
   flex-shrink: 0;
+}
+
+.panel-close-btn {
+  min-width: 30px;
+  min-height: 28px;
+  padding: 0;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(15, 23, 42, 0.35);
+  color: rgba(229, 231, 235, 0.9);
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.panel-close-btn:hover {
+  border-color: rgba(165, 180, 252, 0.75);
+  background: rgba(79, 70, 229, 0.25);
 }
 
 .terminal-header-actions {

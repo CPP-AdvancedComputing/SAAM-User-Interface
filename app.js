@@ -31,6 +31,7 @@ const CONFIG = {
   joints: ["inner_stepper", "outer_stepper", "servo"],
 };
 const DEFAULT_TERMINAL_PASSWORD = import.meta.env.VITE_TERMINAL_PASSWORD || "";
+const ROS_BRIDGE_URL_STORAGE_KEY = "sam-ui-ros-bridge-url-v1";
 
 /** Per-leg IMU topic paths (filtered IMU, String summary, debug raw). */
 const legImuTopics = {
@@ -378,10 +379,45 @@ function connectRos() {
 
 function setupRos() {
   const endpoint = $("ros-endpoint-value");
+  const bridgeSelect = $("ros-bridge-select");
   const rosMenuBtn = $("ros-menu-btn");
   const rosMetaPanel = $("ros-meta-panel");
+
+  // Restore last-used rosbridge URL (if present).
+  try {
+    const saved = localStorage.getItem(ROS_BRIDGE_URL_STORAGE_KEY);
+    if (saved && typeof saved === "string") {
+      CONFIG.ros.bridgeUrl = saved;
+    }
+  } catch (_err) {
+    // ignore
+  }
+
   if (endpoint) {
     endpoint.textContent = CONFIG.ros.bridgeUrl;
+  }
+
+  if (bridgeSelect) {
+    bridgeSelect.value = CONFIG.ros.bridgeUrl;
+    bridgeSelect.addEventListener("change", () => {
+      const next = String(bridgeSelect.value || "").trim();
+      if (!next || next === CONFIG.ros.bridgeUrl) return;
+      CONFIG.ros.bridgeUrl = next;
+      if (endpoint) endpoint.textContent = next;
+      try {
+        localStorage.setItem(ROS_BRIDGE_URL_STORAGE_KEY, next);
+      } catch (_err) {
+        // ignore
+      }
+      // Force reconnect to the newly selected rosbridge.
+      try {
+        ros?.close();
+      } catch (_err) {
+        // ignore
+      }
+      cleanupRosState();
+      connectRos();
+    });
   }
 
   if (rosMenuBtn && rosMetaPanel) {
@@ -2206,9 +2242,43 @@ function connectServiceGateway(gatewayUrl) {
 }
 
 function updateTerminalStatusFromTabs() {
-  const anyConnected = terminalTabs.some((t) => t.ws?.readyState === WebSocket.OPEN);
+  // Only show "Connected" once at least one tab has a usable SSH shell.
+  const anyShellReady = terminalTabs.some((t) => t.shellReady);
   const serviceConnected = serviceSocket?.readyState === WebSocket.OPEN;
-  setTerminalStatus(anyConnected || serviceConnected ? "Connected" : "Disconnected", anyConnected || serviceConnected ? "connected" : "disconnected");
+  if (anyShellReady) {
+    setTerminalStatus("Connected", "connected");
+  } else if (serviceConnected) {
+    // Gateway up, but no SSH shell established yet.
+    setTerminalStatus("Gateway", "disconnected");
+  } else {
+    setTerminalStatus("Disconnected", "disconnected");
+  }
+}
+
+function installPanelCloseButtons() {
+  document.querySelectorAll(".panel-drag-handle[data-drag-panel]").forEach((handle) => {
+    const panelId = handle.getAttribute("data-drag-panel");
+    if (!panelId) return;
+    const panel = $(panelId);
+    if (!panel) return;
+    if (handle.querySelector(".panel-close-btn")) return;
+    // Some panels already have an explicit close control (e.g. Render panel).
+    if (handle.querySelector("#robot-render-close-btn")) return;
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "panel-close-btn";
+    btn.textContent = "×";
+    btn.title = "Close";
+    btn.setAttribute("aria-label", `Close ${panelId}`);
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      panel.hidden = true;
+      const launcherBtn = document.querySelector(`[data-panel-target="${panelId}"]`);
+      if (launcherBtn) launcherBtn.setAttribute("aria-expanded", "false");
+    });
+    handle.appendChild(btn);
+  });
 }
 
 function connectTabGateway(tab, gatewayUrl) {
@@ -2534,6 +2604,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   setupTerminalForm();
   setupTrajectoryPanel();
+  installPanelCloseButtons();
   const gyroZeroRollPitchBtn = $("gyro-zero-roll-pitch-btn");
   if (gyroZeroRollPitchBtn) {
     gyroZeroRollPitchBtn.addEventListener("click", zeroImuRollPitchDisplay);
