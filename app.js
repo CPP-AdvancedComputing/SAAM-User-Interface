@@ -2035,6 +2035,7 @@ function setupPanelLauncher() {
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
+    if (document.fullscreenElement) return;
     // Close the topmost open panel
     const openPanels = panels
       .filter((p) => !p.hidden)

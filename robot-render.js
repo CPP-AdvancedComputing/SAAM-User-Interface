@@ -36,6 +36,7 @@ export function initRobotRenderUI({ panel, getPose }) {
 
   const wrap = panel.querySelector("#robot-render-canvas-wrap");
   const closeBtn = panel.querySelector("#robot-render-close-btn");
+  const fullscreenBtn = panel.querySelector("#robot-render-fullscreen-btn");
   /** @type {HTMLInputElement[]} */
   const layoutRadios = Array.from(panel.querySelectorAll('input[name="robot-render-layout"]'));
 
@@ -218,6 +219,9 @@ export function initRobotRenderUI({ panel, getPose }) {
 
   function syncRendererToPanelVisibility() {
     if (panel.hidden) {
+      if (document.fullscreenElement === panel) {
+        document.exitFullscreen?.();
+      }
       stopLoop();
       disposeScene();
     } else {
@@ -225,8 +229,53 @@ export function initRobotRenderUI({ panel, getPose }) {
     }
   }
 
+  function syncFullscreenButtonState() {
+    if (!fullscreenBtn) return;
+    const isFs = document.fullscreenElement === panel;
+    fullscreenBtn.textContent = isFs ? "Exit fullscreen" : "Fullscreen";
+    fullscreenBtn.setAttribute("aria-pressed", String(isFs));
+  }
+
+  async function toggleFullscreen() {
+    try {
+      if (document.fullscreenElement === panel) {
+        await document.exitFullscreen?.();
+      } else {
+        await panel.requestFullscreen?.();
+      }
+    } catch (_err) {
+      // ignore
+    }
+  }
+
+  function isTypingContext(target) {
+    if (!(target instanceof HTMLElement)) return false;
+    const tag = target.tagName;
+    return (
+      tag === "INPUT" ||
+      tag === "TEXTAREA" ||
+      tag === "SELECT" ||
+      target.isContentEditable
+    );
+  }
+
   const visibilityObserver = new MutationObserver(() => syncRendererToPanelVisibility());
   visibilityObserver.observe(panel, { attributes: true, attributeFilter: ["hidden"] });
+
+  fullscreenBtn?.addEventListener("click", toggleFullscreen);
+  document.addEventListener("keydown", (e) => {
+    if (panel.hidden) return;
+    if (isTypingContext(e.target)) return;
+    // Space / Spacebar both covered for browser compatibility.
+    if (e.key !== " " && e.key !== "Spacebar") return;
+    e.preventDefault();
+    toggleFullscreen();
+  });
+  document.addEventListener("fullscreenchange", () => {
+    syncFullscreenButtonState();
+    onResize();
+  });
+  syncFullscreenButtonState();
 
   closeBtn?.addEventListener("click", () => {
     panel.hidden = true;

@@ -1871,6 +1871,22 @@ body.dragging-panel {
   background: rgba(79, 70, 229, 0.4);
 }
 
+.robot-render-fullscreen-btn {
+  padding: 6px 14px;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  background: rgba(15, 23, 42, 0.45);
+  color: var(--text-primary);
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.robot-render-fullscreen-btn:hover {
+  border-color: rgba(165, 180, 252, 0.8);
+  background: rgba(79, 70, 229, 0.2);
+}
+
 .robot-render-canvas-wrap {
   width: 100%;
   min-height: 280px;
@@ -1879,6 +1895,36 @@ body.dragging-panel {
   position: relative;
   border-radius: var(--radius-md);
   overflow: hidden;
+}
+
+#robot-render-panel:fullscreen {
+  width: 100vw;
+  max-width: none;
+  max-height: none;
+  height: 100vh;
+  right: 0;
+  left: 0;
+  top: 0;
+  padding: 12px;
+  border-radius: 0;
+}
+
+#robot-render-panel:fullscreen .robot-render-toolbar-right {
+  display: none;
+}
+
+#robot-render-panel:fullscreen .robot-render-hint {
+  display: none;
+}
+
+#robot-render-panel:fullscreen .robot-render-panel-head.panel-drag-handle {
+  margin-bottom: 0;
+  padding-bottom: 8px;
+}
+
+#robot-render-panel:fullscreen .robot-render-canvas-wrap {
+  height: calc(100vh - 82px);
+  min-height: 300px;
 }
 
 .robot-render-canvas-wrap canvas {
