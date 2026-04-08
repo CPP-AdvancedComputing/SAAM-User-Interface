@@ -2327,9 +2327,14 @@ function connectTabGateway(tab, gatewayUrl) {
       if (payload.type === "output") {
         appendToTab(idx, payload.data || "");
       } else if (payload.type === "status") {
-        appendToTab(idx, `\r\n[status] ${payload.message}\r\n`);
-        if (String(payload.message || "").includes("Shell ready")) {
+        let message = String(payload.message || "");
+        if (message.includes("Terminal gateway connected")) {
+          message = "Terminal gateway connected (SSH not yet connected)";
+        }
+        appendToTab(idx, `\r\n[status] ${message}\r\n`);
+        if (message.includes("Shell ready")) {
           tab.shellReady = true;
+          updateTerminalStatusFromTabs();
         }
       } else if (payload.type === "error") {
         appendToTab(idx, `\r\n[error] ${payload.message}\r\n`);
