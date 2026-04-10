@@ -25,13 +25,14 @@ const CONFIG = {
     plannerStatusTopic: "/planner/status",
   },
   terminal: {
-    gatewayUrl: "ws://localhost:8787",
+    gatewayUrl: "ws://10.12.64.222:8787",
   },
   legs: ["l0", "l1", "l2", "l3"],
   joints: ["inner_stepper", "outer_stepper", "servo"],
 };
 const DEFAULT_TERMINAL_PASSWORD = import.meta.env.VITE_TERMINAL_PASSWORD || "";
 const ROS_BRIDGE_URL_STORAGE_KEY = "sam-ui-ros-bridge-url-v1";
+const TERMINAL_GATEWAY_URL_STORAGE_KEY = "sam-ui-terminal-gateway-url-v1";
 
 /** Per-leg IMU topic paths (filtered IMU, String summary, debug raw). */
 const legImuTopics = {
@@ -2111,8 +2112,34 @@ function renderDeviceStatuses(devices) {
   }
 }
 
+function disconnectTerminalGatewaySockets() {
+  deviceScanInFlight = false;
+  if (serviceSocket && serviceSocket.readyState <= WebSocket.OPEN) {
+    try {
+      serviceSocket.close();
+    } catch (_err) {
+      // ignore
+    }
+  }
+  serviceSocket = null;
+  serviceSocketUrl = "";
+  for (const tab of terminalTabs) {
+    tab.shellReady = false;
+    if (tab.ws && tab.ws.readyState <= WebSocket.OPEN) {
+      try {
+        tab.ws.close();
+      } catch (_err) {
+        // ignore
+      }
+    }
+    tab.ws = null;
+    tab.gatewayUrl = "";
+  }
+  updateTerminalStatusFromTabs();
+}
+
 function getTerminalConnectionConfig() {
-  const gatewayUrl = ($("terminal-gateway-url")?.value || "").trim();
+  const gatewayUrl = ($("terminal-gateway-select")?.value || "").trim();
   const host = ($("terminal-host")?.value || "").trim();
   const port = Number.parseInt(($("terminal-port")?.value || "").trim(), 10) || 22;
   const username = ($("terminal-user")?.value || "").trim();
@@ -2504,12 +2531,35 @@ function setupTerminalForm() {
   const connectBtn = $("terminal-connect-btn");
   const settingsBtn = $("terminal-settings-toggle-btn");
   const settingsPanel = $("terminal-settings");
-  const gatewayInput = $("terminal-gateway-url");
+  const gatewaySelect = $("terminal-gateway-select");
   const passwordInput = $("terminal-password");
   const refreshDevicesBtn = $("refresh-devices-btn");
   const autoRefreshDevices = $("auto-refresh-devices");
 
-  gatewayInput.value = CONFIG.terminal.gatewayUrl;
+  if (gatewaySelect) {
+    try {
+      const saved = localStorage.getItem(TERMINAL_GATEWAY_URL_STORAGE_KEY);
+      if (saved && typeof saved === "string") {
+        const ok = [...gatewaySelect.options].some((o) => o.value === saved);
+        if (ok) CONFIG.terminal.gatewayUrl = saved;
+      }
+    } catch (_err) {
+      // ignore
+    }
+    gatewaySelect.value = CONFIG.terminal.gatewayUrl;
+    gatewaySelect.addEventListener("change", () => {
+      const next = String(gatewaySelect.value || "").trim();
+      if (!next || next === CONFIG.terminal.gatewayUrl) return;
+      CONFIG.terminal.gatewayUrl = next;
+      try {
+        localStorage.setItem(TERMINAL_GATEWAY_URL_STORAGE_KEY, next);
+      } catch (_err) {
+        // ignore
+      }
+      disconnectTerminalGatewaySockets();
+      logLine("TERM", "Gateway: " + next);
+    });
+  }
   if (passwordInput && !passwordInput.value) {
     passwordInput.value = DEFAULT_TERMINAL_PASSWORD;
   }

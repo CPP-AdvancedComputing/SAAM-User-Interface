@@ -98,7 +98,7 @@
         });
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-Bv2j_aV8.js"></script>
+    <script type="module" crossorigin src="/assets/index-C9yFSh2G.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-CyodjzY0.css">
   </head>
   <body>
@@ -253,8 +253,11 @@
         </div>
         <div id="terminal-settings" class="terminal-settings" aria-label="Jetson terminal settings" hidden>
           <div class="field-group">
-            <label for="terminal-gateway-url">Gateway</label>
-            <input id="terminal-gateway-url" type="text" value="ws://localhost:8787" autocomplete="off" />
+            <label for="terminal-gateway-select">Gateway</label>
+            <select id="terminal-gateway-select" aria-label="Select terminal gateway">
+              <option value="ws://10.12.64.222:8787">10.12.64.222</option>
+              <option value="ws://10.42.0.1:8787">10.42.0.1</option>
+            </select>
           </div>
           <div class="field-group">
             <label for="terminal-host">Host</label>
