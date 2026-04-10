@@ -2564,7 +2564,7 @@ function setupTerminalForm() {
     ro.observe(tabsContent);
   }
 
-  appendToTab(0, "S.A.M. Jetson terminal ready.\r\n");
+  appendToTab(0, "S.A.A.M. Jetson terminal ready.\r\n");
 
   requestDeviceScan();
 
@@ -2677,7 +2677,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   restoreUILayoutFromStorage();
 
-  logLine("INFO", "S.A.M. Control Interface ready");
+  logLine("INFO", "S.A.A.M. Control Interface ready");
   logLine(
     "HINT",
     "Keyboard hints: ` = E-Stop (always, including over inputs and terminal), Tab to move, Space/Enter to activate, Alt+S = command preset, Alt+C = command line. In stepper fields, Enter sends velocity."
