@@ -554,6 +554,16 @@
             <button type="button" class="log-filter-btn" data-log-filter="error">Errors</button>
             <button type="button" class="log-filter-btn" data-log-filter="ros">ROS</button>
             <button type="button" class="log-filter-btn" data-log-filter="send">Sent</button>
+            <button type="button" class="log-filter-btn" data-log-filter="pico">Pico</button>
+          </div>
+        </div>
+        <div id="pico-log-toolbar" class="pico-log-toolbar" hidden>
+          <span class="hint"><code>/web/log</code> — Pico output</span>
+          <div class="pico-log-leg-row" role="tablist" aria-label="Pico leg">
+            <button type="button" class="pico-leg-btn active" data-pico-leg="l0" role="tab" aria-selected="true">l0</button>
+            <button type="button" class="pico-leg-btn" data-pico-leg="l1" role="tab" aria-selected="false">l1</button>
+            <button type="button" class="pico-leg-btn" data-pico-leg="l2" role="tab" aria-selected="false">l2</button>
+            <button type="button" class="pico-leg-btn" data-pico-leg="l3" role="tab" aria-selected="false">l3</button>
           </div>
         </div>
         <div
@@ -562,6 +572,14 @@
           tabindex="0"
           aria-live="polite"
           aria-label="Command and connection log"
+        ></div>
+        <div
+          id="pico-log-output"
+          class="log-output pico-log-output"
+          hidden
+          tabindex="0"
+          aria-live="polite"
+          aria-label="Pico microcontroller log"
         ></div>
       </section>
 

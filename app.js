@@ -23,6 +23,7 @@ const CONFIG = {
     jetsonCpuLoadTopic: "/jetson/cpu_load_percent",
     float32MessageType: "std_msgs/msg/Float32",
     plannerStatusTopic: "/planner/status",
+    webLogTopic: "/web/log",
   },
   terminal: {
     gatewayUrl: "ws://10.12.64.222:8787",
@@ -83,6 +84,12 @@ const legEnableRosTopics = [];
 let jetsonCpuTempTopic = null;
 let jetsonCpuLoadTopic = null;
 let plannerStatusRosTopic = null;
+let webLogTopic = null;
+const WEB_LOG_LEGS = ["l0", "l1", "l2", "l3"];
+const MAX_WEB_LOG_LINES = 600;
+/** @type {Record<string, { time: string, text: string }[]>} */
+const webLogBuffers = Object.fromEntries(WEB_LOG_LEGS.map((id) => [id, []]));
+let activePicoLeg = "l0";
 let isConnected = false;
 let rosReconnectTimer = null;
 let serviceSocket = null;
@@ -98,6 +105,11 @@ let lastDeviceJson = "";
 const DEFAULT_HOTSPOT_DEVICES = Object.freeze([
   { name: "l0", ip: "10.42.0.181", status: "unknown" },
 ]);
+
+/** Fixed labels for hotspot IPs when the scan has no DHCP hostname (often echoes the IP). */
+const HOTSPOT_IP_DISPLAY_NAMES = Object.freeze({
+  "10.42.0.181": "l0",
+});
 
 /** Hotspot client IPs to hide (e.g. operator laptop). Mirrors terminal-server.cjs `blockedIPs`. */
 const BLOCKED_HOTSPOT_IPS = new Set(["10.42.0.106"]);
@@ -118,6 +130,15 @@ function isHotspotSubnet10240(ipStr) {
   return n[0] === 10 && n[1] === 42 && n[2] === 0;
 }
 
+function applyHotspotDisplayNames(devices) {
+  return devices.map((d) => {
+    const ip = String(d?.ip || "").trim();
+    const label = HOTSPOT_IP_DISPLAY_NAMES[ip];
+    if (!label) return d;
+    return { ...d, name: label };
+  });
+}
+
 function normalizeHotspotDevices(devices) {
   const arr = Array.isArray(devices) ? devices : [];
   const filtered = arr.filter(
@@ -126,7 +147,7 @@ function normalizeHotspotDevices(devices) {
       (isHotspotSubnet10240(d.ip) || isHotspotSubnet10240(d.name))
   );
   if (filtered.length === 0) return [...DEFAULT_HOTSPOT_DEVICES];
-  return filtered;
+  return applyHotspotDisplayNames(filtered);
 }
 
 function $(id) {
@@ -340,12 +361,29 @@ function teardownPlannerStatusTopics() {
   resetPlannerStatusDisplay();
 }
 
+function teardownWebLogTopic() {
+  if (webLogTopic) {
+    try {
+      webLogTopic.unsubscribe();
+    } catch (_e) {
+      // ignore
+    }
+    webLogTopic = null;
+  }
+  for (const leg of WEB_LOG_LEGS) {
+    webLogBuffers[leg].length = 0;
+  }
+  const po = $("pico-log-output");
+  if (po) po.innerHTML = "";
+}
+
 function cleanupRosState() {
   teardownTrajectoryTopics();
   teardownImuTopics();
   teardownLegEnableTopics();
   teardownJetsonLoadTopics();
   teardownPlannerStatusTopics();
+  teardownWebLogTopic();
   isConnected = false;
   commandTopic = null;
   testingTopic = null;
@@ -508,6 +546,147 @@ function initTopics() {
   initLegEnableTopics();
   initJetsonLoadTopics();
   initPlannerStatusTopics();
+  initWebLogTopic();
+}
+
+/** Normalize leg key from publisher (expects l0–l3). */
+function normalizeWebLogLeg(leg) {
+  const L = typeof leg === "string" ? leg.trim().toLowerCase() : "";
+  return WEB_LOG_LEGS.includes(L) ? L : "l0";
+}
+
+/**
+ * Parse `/web/log` std_msgs/String.
+ * Primary JSON shape: { "source_ip": "...", "leg_id": "l1", "message": "..." }.
+ * Also accepts leg_id / legId / leg, and message / msg / text / line.
+ */
+function tryParseWebLogJsonObject(j) {
+  if (!j || typeof j !== "object") return null;
+  const legRaw = j.leg_id ?? j.legId ?? j.leg;
+  const leg = typeof legRaw === "string" ? legRaw.trim().toLowerCase() : "";
+  const text =
+    j.message ??
+    j.msg ??
+    j.text ??
+    j.line ??
+    (typeof j.data === "string" ? j.data : null);
+  if (text == null) return null;
+  return { leg: normalizeWebLogLeg(leg), text: String(text) };
+}
+
+function parseWebLogPayload(dataStr) {
+  const s = String(dataStr ?? "");
+  const trimmed = s.trim();
+  try {
+    const j = JSON.parse(trimmed);
+    const parsed = tryParseWebLogJsonObject(j);
+    if (parsed) return parsed;
+  } catch (_e) {
+    // not JSON
+  }
+  const pipe = /^(l[0-3])\s*[|:\t]\s*([\s\S]*)$/i.exec(trimmed);
+  if (pipe) {
+    return { leg: pipe[1].toLowerCase(), text: pipe[2] };
+  }
+  const bracket = /^\[(l[0-3])\]\s*([\s\S]*)$/i.exec(trimmed);
+  if (bracket) {
+    return { leg: bracket[1].toLowerCase(), text: bracket[2] };
+  }
+  return { leg: "l0", text: trimmed };
+}
+
+function appendWebLogEntry(leg, text) {
+  const L = WEB_LOG_LEGS.includes(leg) ? leg : "l0";
+  const buf = webLogBuffers[L];
+  const entry = { time: nowTime(), text };
+  buf.push(entry);
+  while (buf.length > MAX_WEB_LOG_LINES) buf.shift();
+  if (activeLogFilter === "pico" && activePicoLeg === L) {
+    const out = $("pico-log-output");
+    if (!out) return;
+    const line = document.createElement("div");
+    line.className = "log-line";
+    const timeSpan = document.createElement("span");
+    timeSpan.className = "log-time";
+    timeSpan.textContent = entry.time;
+    const msgSpan = document.createElement("span");
+    msgSpan.className = "log-message";
+    msgSpan.textContent = text;
+    line.appendChild(timeSpan);
+    line.appendChild(msgSpan);
+    out.appendChild(line);
+    out.scrollTop = out.scrollHeight;
+  }
+}
+
+function renderPicoLogPanel() {
+  const out = $("pico-log-output");
+  if (!out) return;
+  out.innerHTML = "";
+  const buf = webLogBuffers[activePicoLeg] || [];
+  for (const entry of buf) {
+    const line = document.createElement("div");
+    line.className = "log-line";
+    const timeSpan = document.createElement("span");
+    timeSpan.className = "log-time";
+    timeSpan.textContent = entry.time;
+    const msgSpan = document.createElement("span");
+    msgSpan.className = "log-message";
+    msgSpan.textContent = entry.text;
+    line.appendChild(timeSpan);
+    line.appendChild(msgSpan);
+    out.appendChild(line);
+  }
+  out.scrollTop = out.scrollHeight;
+}
+
+function updatePicoLogViewVisibility() {
+  const main = $("log-output");
+  const tb = $("pico-log-toolbar");
+  const po = $("pico-log-output");
+  const pico = activeLogFilter === "pico";
+  if (main) main.hidden = pico;
+  if (tb) tb.hidden = !pico;
+  if (po) {
+    po.hidden = !pico;
+    if (pico) renderPicoLogPanel();
+  }
+}
+
+function initWebLogTopic() {
+  teardownWebLogTopic();
+  if (!ros) return;
+  webLogTopic = new ROSLIB.Topic({
+    ros,
+    name: CONFIG.ros.webLogTopic,
+    messageType: CONFIG.ros.commandMessageType,
+  });
+  webLogTopic.subscribe((msg) => {
+    const raw = msg?.data != null ? String(msg.data) : "";
+    for (const part of raw.split(/\r?\n/)) {
+      const line = part.trim();
+      if (!line) continue;
+      const { leg, text } = parseWebLogPayload(line);
+      appendWebLogEntry(leg, text);
+    }
+  });
+  logLine("ROS", `Subscribed to ${CONFIG.ros.webLogTopic} (std_msgs/String) for Pico log`, "ros");
+}
+
+function setupPicoLogUi() {
+  document.querySelectorAll(".pico-leg-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      const leg = String(b.dataset.picoLeg || "l0");
+      if (!WEB_LOG_LEGS.includes(leg)) return;
+      activePicoLeg = leg;
+      document.querySelectorAll(".pico-leg-btn").forEach((x) => {
+        const is = x === b;
+        x.classList.toggle("active", is);
+        x.setAttribute("aria-selected", is ? "true" : "false");
+      });
+      renderPicoLogPanel();
+    });
+  });
 }
 
 function resetPlannerStatusDisplay() {
@@ -1360,7 +1539,7 @@ function setupCommandForm() {
 }
 
 const LEGS = [
-  { id: "L0", label: "Leg 0", hasInner: false, hasOuter: true },
+  { id: "L0", label: "Leg 0", hasInner: true, hasOuter: false },
   { id: "L1", label: "Leg 1", hasInner: true, hasOuter: true },
   { id: "L2", label: "Leg 2", hasInner: true, hasOuter: true },
   { id: "L3", label: "Leg 3", hasInner: true, hasOuter: false, hasServo: false },
@@ -2350,19 +2529,34 @@ function installPanelCloseButtons() {
 }
 
 /** Tell the gateway the xterm size so the SSH PTY matches (needed for stty / Ctrl+C → SIGINT). */
-function sendTerminalPtySize(tab) {
+function sendTerminalPtySize(tab, immediate = false) {
   if (!tab?.term || tab.ws?.readyState !== WebSocket.OPEN || !tab.shellReady) return;
-  try {
-    tab.ws.send(
-      JSON.stringify({
-        type: "resize",
-        cols: tab.term.cols,
-        rows: tab.term.rows,
-      })
-    );
-  } catch (_err) {
-    // ignore
+  const run = () => {
+    if (!tab?.term || tab.ws?.readyState !== WebSocket.OPEN || !tab.shellReady) return;
+    const cols = tab.term.cols;
+    const rows = tab.term.rows;
+    if (tab.lastSentPtyCols === cols && tab.lastSentPtyRows === rows) return;
+    try {
+      tab.ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      tab.lastSentPtyCols = cols;
+      tab.lastSentPtyRows = rows;
+    } catch (_err) {
+      // ignore
+    }
+  };
+  if (immediate) {
+    if (tab.ptyResizeTimer) {
+      clearTimeout(tab.ptyResizeTimer);
+      tab.ptyResizeTimer = null;
+    }
+    run();
+    return;
   }
+  if (tab.ptyResizeTimer) clearTimeout(tab.ptyResizeTimer);
+  tab.ptyResizeTimer = setTimeout(() => {
+    tab.ptyResizeTimer = null;
+    run();
+  }, 60);
 }
 
 function connectTabGateway(tab, gatewayUrl) {
@@ -2388,6 +2582,12 @@ function connectTabGateway(tab, gatewayUrl) {
 
     ws.addEventListener("close", () => {
       tab.shellReady = false;
+      tab.lastSentPtyCols = undefined;
+      tab.lastSentPtyRows = undefined;
+      if (tab.ptyResizeTimer) {
+        clearTimeout(tab.ptyResizeTimer);
+        tab.ptyResizeTimer = null;
+      }
       if (tab.ws === ws) tab.ws = null;
       updateTerminalStatusFromTabs();
     });
@@ -2418,12 +2618,15 @@ function connectTabGateway(tab, gatewayUrl) {
         appendToTab(idx, `\r\n[status] ${message}\r\n`);
         if (message.includes("Shell ready")) {
           tab.shellReady = true;
-          sendTerminalPtySize(tab);
+          sendTerminalPtySize(tab, true);
           updateTerminalStatusFromTabs();
         }
       } else if (payload.type === "error") {
-        appendToTab(idx, `\r\n[error] ${payload.message}\r\n`);
-        logLine("TERM", payload.message, "error");
+        const errMsg = String(payload.message || "");
+        // Some gateways reject PTY resize; dedupe in sendTerminalPtySize limits traffic — skip UI spam.
+        if (/unsupported message type:\s*resize/i.test(errMsg)) return;
+        appendToTab(idx, `\r\n[error] ${errMsg}\r\n`);
+        logLine("TERM", errMsg, "error");
       }
     });
   });
@@ -2464,6 +2667,9 @@ function createTerminalTab(label) {
     term,
     fitAddon,
     shellReady: false,
+    lastSentPtyCols: undefined,
+    lastSentPtyRows: undefined,
+    ptyResizeTimer: null,
     paneEl: pane,
     containerEl: container,
   };
@@ -2540,10 +2746,14 @@ function createTerminalTab(label) {
 
   tabsList.appendChild(tabBtn);
 
+  let resizeFitRaf = 0;
   const resizeObserver = new ResizeObserver(() => {
-    if (terminalTabs[index] && activeTabIndex === index) {
+    if (!terminalTabs[index] || activeTabIndex !== index) return;
+    if (resizeFitRaf) cancelAnimationFrame(resizeFitRaf);
+    resizeFitRaf = requestAnimationFrame(() => {
+      resizeFitRaf = 0;
       terminalTabs[index].fitAddon?.fit();
-    }
+    });
   });
   resizeObserver.observe(container);
 
@@ -2562,12 +2772,16 @@ function switchTerminalTab(index) {
   const tab = terminalTabs[index];
   tab?.fitAddon?.fit();
   tab?.term?.focus();
-  sendTerminalPtySize(tab);
+  sendTerminalPtySize(tab, true);
 }
 
 function closeTerminalTab(index) {
   if (terminalTabs.length <= 1) return;
   const tab = terminalTabs[index];
+  if (tab?.ptyResizeTimer) {
+    clearTimeout(tab.ptyResizeTimer);
+    tab.ptyResizeTimer = null;
+  }
   if (tab?.ws) {
     try {
       tab.ws.close();
@@ -2764,6 +2978,7 @@ window.addEventListener("DOMContentLoaded", () => {
       activeLogFilter = btn.dataset.logFilter || "all";
       document.querySelectorAll(".log-filter-btn").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
+      updatePicoLogViewVisibility();
       const lines = document.querySelectorAll("#log-output .log-line");
       lines.forEach((line) => {
         if (activeLogFilter === "all" || line.dataset.logKind === activeLogFilter) {
@@ -2774,6 +2989,8 @@ window.addEventListener("DOMContentLoaded", () => {
       });
     });
   });
+
+  setupPicoLogUi();
 
   const launchBtn = $("launch-ros-bridge-btn");
   if (launchBtn) {
