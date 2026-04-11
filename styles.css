@@ -1677,6 +1677,11 @@ button:disabled {
   border-color: rgba(129, 140, 248, 1);
 }
 
+/* Ensure leg tabs stay hidden unless Pico filter is active (`hidden` can lose to flex parents). */
+#pico-log-toolbar[hidden] {
+  display: none !important;
+}
+
 .pico-log-toolbar {
   display: flex;
   flex-wrap: wrap;

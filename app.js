@@ -2991,6 +2991,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   setupPicoLogUi();
+  updatePicoLogViewVisibility();
 
   const launchBtn = $("launch-ros-bridge-btn");
   if (launchBtn) {
