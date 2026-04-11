@@ -1264,8 +1264,16 @@ button:disabled {
   gap: 10px;
 }
 
-.cmd-row .field-group {
-  flex: 1;
+/* Cap each column at half the row (minus gap) so Type stays the same width when Leg is hidden. */
+.cmd-row > .field-group {
+  flex: 1 1 calc(50% - 5px);
+  min-width: 0;
+  max-width: calc(50% - 5px);
+}
+
+/* `.field-group { display: flex }` otherwise overrides the HTML `hidden` attribute. */
+#cmd-leg-group[hidden] {
+  display: none !important;
 }
 
 .cmd-fields {

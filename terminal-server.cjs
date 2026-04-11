@@ -40,6 +40,39 @@ function toCrlf(str) {
   return str.replace(/\r?\n/g, "\r\n");
 }
 
+/**
+ * Stop the foreground process like a real interactive terminal by sending the PTY interrupt
+ * character. Avoid SSH channel signals here because some servers apply them to the shell
+ * session itself, which drops the connection instead of only interrupting the current job.
+ */
+function sendPtyInterrupt(stream) {
+  if (!stream) return;
+  try {
+    stream.write("\x03");
+  } catch (_err) {
+    // ignore
+  }
+}
+
+
+/**
+ * Stop foreground process like a real terminal: intr byte on PTY, plus SSH SIGNAL when the
+ * kernel line discipline is wrong (does not close the SSH session).
+ */
+function forwardSigintToShell(stream) {
+  if (!stream) return;
+  try {
+    stream.write("\x03");
+  } catch (_err) {
+    // ignore
+  }
+  try {
+    stream.signal("INT");
+  } catch (_err) {
+    // ignore — not all servers implement channel signals
+  }
+}
+
 const wss = new WebSocketServer({ port: PORT });
 
 wss.on("connection", (ws) => {
@@ -163,49 +196,55 @@ wss.on("connection", (ws) => {
 
       ssh
         .on("ready", () => {
-          ssh.shell({ term: "xterm-256color" }, (err, stream) => {
-            if (err) {
-              send(ws, {
-                type: "error",
-                message: `SSH shell failed: ${err.message}`,
+          ssh.shell(
+            { term: "xterm-256color", cols: 80, rows: 24 },
+            (err, stream) => {
+              if (err) {
+                send(ws, {
+                  type: "error",
+                  message: `SSH shell failed: ${err.message}`,
+                });
+                closeShellSession();
+                reject(err);
+                return;
+              }
+
+              session.shell = stream;
+              session.connectionKey = requestedKey;
+              session.ready = false;
+
+              stream.on("data", processShellData);
+
+              stream.on("close", () => {
+                flushBufferedOutput();
+                send(ws, { type: "status", message: "Terminal shell closed." });
+                closeShellSession();
               });
-              closeShellSession();
-              reject(err);
-              return;
+
+              stream.stderr.on("data", (data) => {
+                send(ws, {
+                  type: "output",
+                  stream: "stderr",
+                  data: toCrlf(data.toString()),
+                });
+              });
+
+              send(ws, {
+                type: "status",
+                message: `Shell connected to ${requestedKey}`,
+              });
+
+              stream.write(
+                "stty sane 2>/dev/null; stty isig icanon echo 2>/dev/null; stty intr $'\\x03' 2>/dev/null; true\n"
+              );
+              stream.write("export TERM=xterm-256color\n");
+              stream.write("unset PROMPT_COMMAND\n");
+              stream.write("export PS1='\\u@\\h:\\w$ '\n");
+              stream.write("printf '__SAM_READY__\\n'\n");
+
+              resolve();
             }
-
-            session.shell = stream;
-            session.connectionKey = requestedKey;
-            session.ready = false;
-
-            stream.on("data", processShellData);
-
-            stream.on("close", () => {
-              flushBufferedOutput();
-              send(ws, { type: "status", message: "Terminal shell closed." });
-              closeShellSession();
-            });
-
-            stream.stderr.on("data", (data) => {
-              send(ws, {
-                type: "output",
-                stream: "stderr",
-                data: toCrlf(data.toString()),
-              });
-            });
-
-            send(ws, {
-              type: "status",
-              message: `Shell connected to ${requestedKey}`,
-            });
-
-            stream.write("export TERM=xterm-256color\n");
-            stream.write("unset PROMPT_COMMAND\n");
-            stream.write("export PS1='\\u@\\h:\\w$ '\n");
-            stream.write("printf '__SAM_READY__\\n'\n");
-
-            resolve();
-          });
+          );
         })
         .on("error", (err) => {
           send(ws, {
@@ -282,16 +321,60 @@ wss.on("connection", (ws) => {
     const password = String(message.password || "");
     const type = String(message.type || message.op || "").trim();
 
-    if (type === "interrupt" || type === "send_interrupt") {
+    if (type === "interrupt" || type === "send_interrupt" || type === "sigint") {
       if (session.shell && session.ready) {
-        session.shell.write("\x03");
+        sendPtyInterrupt(session.shell);
+      }
+      return;
+    }
+
+    if (type === "input_b64" && typeof message.data === "string") {
+      if (session.shell && session.ready) {
+        try {
+          const buf = Buffer.from(String(message.data).replace(/\s+/g, ""), "base64");
+          if (buf.length === 1 && buf[0] === 3) {
+            sendPtyInterrupt(session.shell);
+          } else if (buf.length) {
+            session.shell.write(buf);
+          }
+        } catch (_err) {
+          // ignore
+        }
+      }
+      return;
+    }
+
+    if (type === "resize") {
+      const cols = Number.parseInt(message.cols, 10);
+      const rows = Number.parseInt(message.rows, 10);
+      if (
+        session.shell &&
+        session.ready &&
+        Number.isFinite(cols) &&
+        Number.isFinite(rows) &&
+        cols > 0 &&
+        rows > 0
+      ) {
+        try {
+          session.shell.setWindow(rows, cols, 0, 0);
+        } catch (_err) {
+          // ignore
+        }
       }
       return;
     }
 
     if (type === "input" && (typeof message.data === "string" || Buffer.isBuffer(message.data))) {
       if (session.shell && session.ready) {
-        session.shell.write(typeof message.data === "string" ? message.data : message.data.toString());
+        const raw =
+          typeof message.data === "string"
+            ? message.data
+            : message.data.toString("utf8");
+        if (raw.length === 1 && raw.charCodeAt(0) === 3) {
+          sendPtyInterrupt(session.shell);
+        } else {
+          session.shell.write(raw);
+        }
       }
       return;
     }
@@ -449,4 +532,3 @@ wss.on("connection", (ws) => {
 });
 
 console.log(`Terminal gateway listening on ws://localhost:${PORT}`);
-

@@ -229,14 +229,23 @@
               </tr>
             </thead>
             <tbody id="device-status-body">
-              <tr><td colspan="3" class="hint" style="text-align:center;padding:16px 0;">Scanning...</td></tr>
+              <tr>
+                <td>l0</td>
+                <td>10.42.0.181</td>
+                <td class="device-status-unknown">unknown</td>
+              </tr>
             </tbody>
           </table>
         </div>
       </section>
 
       <section id="terminal-panel" class="quick-panel" hidden>
-        <div id="terminal-drag-handle" class="panel-drag-handle" aria-label="Drag console panel">
+        <div
+          id="terminal-drag-handle"
+          class="panel-drag-handle"
+          data-drag-panel="terminal-panel"
+          aria-label="Drag console panel"
+        >
           <h2>Jetson Terminal</h2>
           <div class="terminal-header-actions">
             <button

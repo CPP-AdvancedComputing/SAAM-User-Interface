@@ -94,6 +94,41 @@ let deviceRefreshTimer = null;
 let deviceScanInFlight = false;
 let lastDeviceJson = "";
 
+/** When hotspot scan returns no rows, show this default entry. */
+const DEFAULT_HOTSPOT_DEVICES = Object.freeze([
+  { name: "l0", ip: "10.42.0.181", status: "unknown" },
+]);
+
+/** Hotspot client IPs to hide (e.g. operator laptop). Mirrors terminal-server.cjs `blockedIPs`. */
+const BLOCKED_HOTSPOT_IPS = new Set(["10.42.0.106"]);
+
+function isBlockedHotspotDevice(d) {
+  const ip = String(d?.ip || "").trim();
+  const name = String(d?.name || "").trim();
+  return BLOCKED_HOTSPOT_IPS.has(ip) || BLOCKED_HOTSPOT_IPS.has(name);
+}
+
+/** True if string is an IPv4 in 10.42.0.0/24 (hotspot client range). */
+function isHotspotSubnet10240(ipStr) {
+  const s = String(ipStr || "").trim();
+  const parts = s.split(".");
+  if (parts.length !== 4) return false;
+  const n = parts.map((p) => parseInt(p, 10));
+  if (n.some((x) => !Number.isFinite(x) || x < 0 || x > 255)) return false;
+  return n[0] === 10 && n[1] === 42 && n[2] === 0;
+}
+
+function normalizeHotspotDevices(devices) {
+  const arr = Array.isArray(devices) ? devices : [];
+  const filtered = arr.filter(
+    (d) =>
+      !isBlockedHotspotDevice(d) &&
+      (isHotspotSubnet10240(d.ip) || isHotspotSubnet10240(d.name))
+  );
+  if (filtered.length === 0) return [...DEFAULT_HOTSPOT_DEVICES];
+  return filtered;
+}
+
 function $(id) {
   return document.getElementById(id);
 }
@@ -994,7 +1029,7 @@ const CMD_DEFAULTS = {
 function buildCmdFields() {
   const type = $("cmd-type").value;
   const legGroup = $("cmd-leg-group");
-  if (legGroup) legGroup.hidden = type === "move";
+  if (legGroup) legGroup.hidden = type === "walk";
   const container = $("cmd-fields");
   container.innerHTML = "";
 
@@ -1054,7 +1089,7 @@ function buildCmdPayload() {
     const inner = parseFloat(document.getElementById("cmd-f-inner")?.value) || 0;
     const outer = parseFloat(document.getElementById("cmd-f-outer")?.value) || 0;
     const servo = parseFloat(document.getElementById("cmd-f-servo")?.value) || 0;
-    return { type: "move", allLegs: true, inner, outer, servo };
+    return { type: "move", leg_id: leg, inner, outer, servo };
   }
 
   const payload = { type, leg_id: leg };
@@ -1328,7 +1363,7 @@ const LEGS = [
   { id: "L0", label: "Leg 0", hasInner: false, hasOuter: true },
   { id: "L1", label: "Leg 1", hasInner: true, hasOuter: true },
   { id: "L2", label: "Leg 2", hasInner: true, hasOuter: true },
-  { id: "L3", label: "Leg 3", hasInner: true, hasOuter: false },
+  { id: "L3", label: "Leg 3", hasInner: true, hasOuter: false, hasServo: false },
 ];
 
 function getLegValues(legId) {
@@ -1401,7 +1436,7 @@ function buildStepperGrid() {
   const grid = $("stepper-grid");
   grid.innerHTML = "";
 
-  LEGS.forEach(({ id, label, hasInner, hasOuter }) => {
+  LEGS.forEach(({ id, label, hasInner, hasOuter, hasServo = true }) => {
     const card = document.createElement("div");
     card.className = "leg-card";
 
@@ -1443,7 +1478,9 @@ function buildStepperGrid() {
     if (hasOuter) {
       card.appendChild(buildInputRow(id, "outer", "Outside"));
     }
-    card.appendChild(buildInputRow(id, "servo", "Servo"));
+    if (hasServo) {
+      card.appendChild(buildInputRow(id, "servo", "Servo"));
+    }
 
     const setBtn = document.createElement("button");
     setBtn.type = "button";
@@ -1921,6 +1958,11 @@ function setupDraggableConsolePanel() {
     if (e.composedPath().includes($("terminal-settings-toggle-btn"))) {
       return;
     }
+    // Don't start a drag on header controls (settings, close X, etc.) — otherwise pointer
+    // capture + preventDefault blocks the button's click and the panel won't close.
+    if (e.target instanceof Element && e.target.closest("button")) {
+      return;
+    }
 
     bringPanelToFront(panel);
     startMouseX = e.clientX;
@@ -2060,7 +2102,8 @@ function renderDeviceStatuses(devices) {
   const countEl = $("device-count");
   if (!body) return;
 
-  const sorted = [...devices].sort((a, b) => {
+  const list = normalizeHotspotDevices(devices);
+  const sorted = [...list].sort((a, b) => {
     const statusOrder = { connected: 0, unreachable: 1, disconnected: 2, unknown: 3 };
     const sa = statusOrder[a.status] ?? 3;
     const sb = statusOrder[b.status] ?? 3;
@@ -2074,41 +2117,29 @@ function renderDeviceStatuses(devices) {
 
   body.innerHTML = "";
 
-  if (sorted.length === 0) {
+  sorted.forEach((entry) => {
     const tr = document.createElement("tr");
-    const td = document.createElement("td");
-    td.colSpan = 3;
-    td.className = "hint";
-    td.style.textAlign = "center";
-    td.style.padding = "16px 0";
-    td.textContent = "No devices found on hotspot";
-    tr.appendChild(td);
+    const status = String(entry.status || "unknown").toLowerCase();
+
+    const nameTd = document.createElement("td");
+    nameTd.textContent = entry.name || "-";
+
+    const ipTd = document.createElement("td");
+    ipTd.textContent = entry.ip || "-";
+
+    const statusTd = document.createElement("td");
+    statusTd.textContent = entry.status || "unknown";
+    statusTd.className = `device-status-${status}`;
+
+    tr.appendChild(nameTd);
+    tr.appendChild(ipTd);
+    tr.appendChild(statusTd);
     body.appendChild(tr);
-  } else {
-    sorted.forEach((entry) => {
-      const tr = document.createElement("tr");
-      const status = String(entry.status || "unknown").toLowerCase();
+  });
 
-      const nameTd = document.createElement("td");
-      nameTd.textContent = entry.name || "-";
-
-      const ipTd = document.createElement("td");
-      ipTd.textContent = entry.ip || "-";
-
-      const statusTd = document.createElement("td");
-      statusTd.textContent = entry.status || "unknown";
-      statusTd.className = `device-status-${status}`;
-
-      tr.appendChild(nameTd);
-      tr.appendChild(ipTd);
-      tr.appendChild(statusTd);
-      body.appendChild(tr);
-    });
-  }
-
-  const connectedCount = devices.filter((d) => d.status === "connected").length;
+  const connectedCount = list.filter((d) => d.status === "connected").length;
   if (countEl) {
-    countEl.textContent = `${connectedCount} connected, ${devices.length} total`;
+    countEl.textContent = `${connectedCount} connected, ${list.length} total`;
   }
 }
 
@@ -2148,6 +2179,8 @@ function getTerminalConnectionConfig() {
   return { gatewayUrl, host, port, username, password };
 }
 
+const ROSBRIDGE_LAUNCH_LINE = "ros2 launch rosbridge_server rosbridge_websocket_launch.xml";
+
 async function launchRosBridge() {
   const btn = $("launch-ros-bridge-btn");
   if (btn) {
@@ -2155,30 +2188,32 @@ async function launchRosBridge() {
     btn.textContent = "Launching...";
   }
 
-  const { gatewayUrl, host, port, username, password } = getTerminalConnectionConfig();
-  if (!gatewayUrl || !host || !username) {
-    logLine("ROS", "Terminal settings required to launch rosbridge", "error");
+  const { host } = getTerminalConnectionConfig();
+  const tab = getActiveTab();
+
+  if (!tab?.ws || tab.ws.readyState !== WebSocket.OPEN) {
+    logLine("ROS", "Connect the terminal to the Jetson first (Connect in the console panel), then launch.", "error");
+    if (btn) { btn.disabled = false; btn.textContent = "Launch"; }
+    return;
+  }
+  if (!tab.shellReady) {
+    logLine("ROS", "Wait until the terminal shows a shell prompt (\"Shell ready\"), then try Launch again.", "error");
     if (btn) { btn.disabled = false; btn.textContent = "Launch"; }
     return;
   }
 
   try {
-    await connectServiceGateway(gatewayUrl);
-    serviceSocket.send(
+    tab.ws.send(
       JSON.stringify({
-        type: "run_command",
-        host,
-        port,
-        username,
-        password,
-        command: "ros2 launch rosbridge_server rosbridge_websocket_launch.xml &",
+        type: "input",
+        data: `${ROSBRIDGE_LAUNCH_LINE}\r`,
       })
     );
-    appendToTab(activeTabIndex, "\r\n$ ros2 launch rosbridge_server rosbridge_websocket_launch.xml &\r\n");
-    logLine("ROS", "Launching rosbridge on " + host);
+    logLine("ROS", `Sent to terminal on ${host || "Jetson"}: ${ROSBRIDGE_LAUNCH_LINE}`);
+    tab.term?.focus();
     setTimeout(() => {
       if (btn) { btn.disabled = false; btn.textContent = "Launch"; }
-    }, 5000);
+    }, 2000);
   } catch (err) {
     logLine("ROS", err.message || "Failed to launch rosbridge", "error");
     if (btn) { btn.disabled = false; btn.textContent = "Launch"; }
@@ -2305,8 +2340,29 @@ function installPanelCloseButtons() {
       const launcherBtn = document.querySelector(`[data-panel-target="${panelId}"]`);
       if (launcherBtn) launcherBtn.setAttribute("aria-expanded", "false");
     });
-    handle.appendChild(btn);
+    const actionGroup = handle.querySelector(".terminal-header-actions");
+    if (actionGroup) {
+      actionGroup.appendChild(btn);
+    } else {
+      handle.appendChild(btn);
+    }
   });
+}
+
+/** Tell the gateway the xterm size so the SSH PTY matches (needed for stty / Ctrl+C → SIGINT). */
+function sendTerminalPtySize(tab) {
+  if (!tab?.term || tab.ws?.readyState !== WebSocket.OPEN || !tab.shellReady) return;
+  try {
+    tab.ws.send(
+      JSON.stringify({
+        type: "resize",
+        cols: tab.term.cols,
+        rows: tab.term.rows,
+      })
+    );
+  } catch (_err) {
+    // ignore
+  }
 }
 
 function connectTabGateway(tab, gatewayUrl) {
@@ -2362,6 +2418,7 @@ function connectTabGateway(tab, gatewayUrl) {
         appendToTab(idx, `\r\n[status] ${message}\r\n`);
         if (message.includes("Shell ready")) {
           tab.shellReady = true;
+          sendTerminalPtySize(tab);
           updateTerminalStatusFromTabs();
         }
       } else if (payload.type === "error") {
@@ -2412,11 +2469,37 @@ function createTerminalTab(label) {
   };
   terminalTabs.push(tab);
 
+  // Ctrl+C: send the raw ETX control character through normal terminal input so even older
+  // gateways can pass it to the PTY without needing a custom message type.
+  container.addEventListener(
+    "keydown",
+    (e) => {
+      if (!tab.shellReady || tab.ws?.readyState !== WebSocket.OPEN) return;
+      if (!e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return;
+      if (e.code !== "KeyC") return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      try {
+        tab.ws.send(JSON.stringify({ type: "input", data: String.fromCharCode(3) }));
+      } catch (_err) {
+        // ignore
+      }
+    },
+    true
+  );
+
+  term.onResize(() => sendTerminalPtySize(tab));
+
   container.addEventListener("click", () => term.focus());
 
   term.onData((data) => {
     if (tab.ws?.readyState === WebSocket.OPEN) {
-      tab.ws.send(JSON.stringify({ type: "input", data }));
+      if (data.length === 1 && data.charCodeAt(0) === 3) {
+        tab.ws.send(JSON.stringify({ type: "input", data }));
+      } else {
+        tab.ws.send(JSON.stringify({ type: "input", data }));
+      }
       if (!tab.shellReady) {
         term.write(data);
         if (data === "\r" || data === "\n") {
@@ -2479,6 +2562,7 @@ function switchTerminalTab(index) {
   const tab = terminalTabs[index];
   tab?.fitAddon?.fit();
   tab?.term?.focus();
+  sendTerminalPtySize(tab);
 }
 
 function closeTerminalTab(index) {
@@ -2616,6 +2700,7 @@ function setupTerminalForm() {
 
   appendToTab(0, "S.A.A.M. Jetson terminal ready.\r\n");
 
+  renderDeviceStatuses([]);
   requestDeviceScan();
 
   setTimeout(() => {
