@@ -97,9 +97,9 @@
           once: true,
         });
       })();
-    </script>
-    <script type="module" crossorigin src="/assets/index-C9yFSh2G.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CyodjzY0.css">
+    </script>
+    <script type="module" crossorigin src="/assets/index-B9FMZsZq.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CEE2UmFO.css">
   </head>
   <body>
     <header class="app-header">
@@ -229,14 +229,23 @@
               </tr>
             </thead>
             <tbody id="device-status-body">
-              <tr><td colspan="3" class="hint" style="text-align:center;padding:16px 0;">Scanning...</td></tr>
+              <tr>
+                <td>l0</td>
+                <td>10.42.0.181</td>
+                <td class="device-status-unknown">unknown</td>
+              </tr>
             </tbody>
           </table>
         </div>
       </section>
 
       <section id="terminal-panel" class="quick-panel" hidden>
-        <div id="terminal-drag-handle" class="panel-drag-handle" aria-label="Drag console panel">
+        <div
+          id="terminal-drag-handle"
+          class="panel-drag-handle"
+          data-drag-panel="terminal-panel"
+          aria-label="Drag console panel"
+        >
           <h2>Jetson Terminal</h2>
           <div class="terminal-header-actions">
             <button
@@ -545,6 +554,16 @@
             <button type="button" class="log-filter-btn" data-log-filter="error">Errors</button>
             <button type="button" class="log-filter-btn" data-log-filter="ros">ROS</button>
             <button type="button" class="log-filter-btn" data-log-filter="send">Sent</button>
+            <button type="button" class="log-filter-btn" data-log-filter="pico">Pico</button>
+          </div>
+        </div>
+        <div id="pico-log-toolbar" class="pico-log-toolbar" hidden>
+          <span class="hint"><code>/web/log</code> — Pico output</span>
+          <div class="pico-log-leg-row" role="tablist" aria-label="Pico leg">
+            <button type="button" class="pico-leg-btn active" data-pico-leg="l0" role="tab" aria-selected="true">l0</button>
+            <button type="button" class="pico-leg-btn" data-pico-leg="l1" role="tab" aria-selected="false">l1</button>
+            <button type="button" class="pico-leg-btn" data-pico-leg="l2" role="tab" aria-selected="false">l2</button>
+            <button type="button" class="pico-leg-btn" data-pico-leg="l3" role="tab" aria-selected="false">l3</button>
           </div>
         </div>
         <div
@@ -553,6 +572,14 @@
           tabindex="0"
           aria-live="polite"
           aria-label="Command and connection log"
+        ></div>
+        <div
+          id="pico-log-output"
+          class="log-output pico-log-output"
+          hidden
+          tabindex="0"
+          aria-live="polite"
+          aria-label="Pico microcontroller log"
         ></div>
       </section>
 
