@@ -1650,6 +1650,27 @@ button:disabled {
   margin: 0;
 }
 
+body.commands-popout-mode .cmd-walk-sequence-table {
+  font-size: 0.72rem;
+}
+
+body.commands-popout-mode .cmd-walk-sequence-table th,
+body.commands-popout-mode .cmd-walk-sequence-table td {
+  padding: 3px;
+}
+
+body.commands-popout-mode .cmd-walk-sequence-table tbody th {
+  min-width: 38px;
+}
+
+body.commands-popout-mode .cmd-walk-cell-input {
+  width: 3.35rem;
+  min-width: 3.35rem;
+  max-width: 3.35rem;
+  padding: 2px 3px;
+  font-size: 0.68rem;
+}
+
 .cmd-inline-status {
   min-height: 1.2em;
   font-size: 0.72rem;

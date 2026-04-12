@@ -160,9 +160,12 @@ function loadStoredHotspotLegIps() {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return {};
     const normalized = {};
+    const seenIps = new Set();
     for (const leg of WEB_LOG_LEGS) {
       const ip = normalizeHotspotIp(parsed[leg]);
-      if (isHotspotClientIp(ip)) normalized[leg] = ip;
+      if (!isHotspotClientIp(ip) || seenIps.has(ip)) continue;
+      normalized[leg] = ip;
+      seenIps.add(ip);
     }
     return normalized;
   } catch (_err) {
@@ -235,8 +238,20 @@ function learnHotspotLegIp(leg, ip) {
   const normalizedIp = normalizeHotspotIp(ip);
   if (!legKey || !isHotspotClientIp(normalizedIp)) return false;
   const sawConnected = noteConnectedHotspotDevice(normalizedIp, legKey);
-  if (learnedHotspotLegIps[legKey] === normalizedIp) return sawConnected;
-  learnedHotspotLegIps = { ...learnedHotspotLegIps, [legKey]: normalizedIp };
+  const nextHints = { ...learnedHotspotLegIps };
+  let changed = false;
+  for (const otherLeg of WEB_LOG_LEGS) {
+    if (otherLeg === legKey) continue;
+    if (nextHints[otherLeg] !== normalizedIp) continue;
+    delete nextHints[otherLeg];
+    changed = true;
+  }
+  if (nextHints[legKey] !== normalizedIp) {
+    nextHints[legKey] = normalizedIp;
+    changed = true;
+  }
+  if (!changed) return sawConnected;
+  learnedHotspotLegIps = nextHints;
   persistHotspotLegIps();
   return true;
 }
@@ -270,13 +285,12 @@ function buildHotspotStatusByIp(devices) {
 
 function normalizeTrackedHotspotDevices(devices) {
   const statusByIp = buildHotspotStatusByIp(devices);
-  const tracked = buildDefaultTrackedHotspotDevices().map((device) => {
+  return buildDefaultTrackedHotspotDevices().map((device) => {
     return {
       ...device,
       status: String(statusByIp.get(device.ip) || device.status || "unknown"),
     };
   });
-  return applyHotspotDisplayNames(tracked);
 }
 
 function normalizeAllHotspotDevices(devices) {
