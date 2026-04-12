@@ -18,6 +18,7 @@ const CONFIG = {
     legCommandMessageType: "sam_interfaces/msg/LegCommand",
     imuMessageType: "sensor_msgs/Imu",
     imuRollPitchMessageType: "std_msgs/String",
+    emptyMessageType: "std_msgs/msg/Empty",
     legEnabledStateMessageType: "std_msgs/msg/Bool",
     jetsonCpuTempTopic: "/jetson/cpu_temp",
     jetsonCpuLoadTopic: "/jetson/cpu_load_percent",
@@ -37,11 +38,28 @@ const TERMINAL_GATEWAY_URL_STORAGE_KEY = "sam-ui-terminal-gateway-url-v1";
 
 /** Per-leg IMU topic paths (filtered IMU, String summary, debug raw). */
 const legImuTopics = {
-  l0: { imu: "/l0/imu/data", rollPitch: "/l0/imu/roll_pitch_deg", raw: "/l0/imu/data_raw" },
-  l1: { imu: "/l1/imu/data", rollPitch: "/l1/imu/roll_pitch_deg", raw: "/l1/imu/data_raw" },
-  l2: { imu: "/l2/imu/data", rollPitch: "/l2/imu/roll_pitch_deg", raw: "/l2/imu/data_raw" },
-  l3: { imu: "/l3/imu/data", rollPitch: "/l3/imu/roll_pitch_deg", raw: "/l3/imu/data_raw" },
+  l0: { imu: "/l0/imu/data", rollPitch: "/l0/imu/roll_pitch_deg", raw: "/l0/imu/data_raw", zero: "/l0/imu/zero_reference" },
+  l1: { imu: "/l1/imu/data", rollPitch: "/l1/imu/roll_pitch_deg", raw: "/l1/imu/data_raw", zero: "/l1/imu/zero_reference" },
+  l2: { imu: "/l2/imu/data", rollPitch: "/l2/imu/roll_pitch_deg", raw: "/l2/imu/data_raw", zero: "/l2/imu/zero_reference" },
+  l3: { imu: "/l3/imu/data", rollPitch: "/l3/imu/roll_pitch_deg", raw: "/l3/imu/data_raw", zero: "/l3/imu/zero_reference" },
 };
+
+const LISTEN_TOPIC_PRESETS = [
+  { label: "/web/log", name: CONFIG.ros.webLogTopic, type: CONFIG.ros.commandMessageType },
+  { label: "/planner/status", name: CONFIG.ros.plannerStatusTopic, type: CONFIG.ros.commandMessageType },
+  { label: "/jetson/cpu_temp", name: CONFIG.ros.jetsonCpuTempTopic, type: CONFIG.ros.float32MessageType },
+  { label: "/jetson/cpu_load_percent", name: CONFIG.ros.jetsonCpuLoadTopic, type: CONFIG.ros.float32MessageType },
+  ...CONFIG.legs.flatMap((legId) => {
+    const paths = legImuTopics[legId];
+    return [
+      { label: `${legId} imu`, name: paths.imu, type: CONFIG.ros.imuMessageType },
+      { label: `${legId} roll/pitch`, name: paths.rollPitch, type: CONFIG.ros.imuRollPitchMessageType },
+      { label: `${legId} raw imu`, name: paths.raw, type: CONFIG.ros.imuMessageType },
+      { label: `${legId} enabled`, name: `/${legId}/enabled_state`, type: CONFIG.ros.legEnabledStateMessageType },
+    ];
+  }),
+  { label: "Custom topic…", name: "__custom__", type: CONFIG.ros.commandMessageType },
+];
 
 /**
  * Per-leg UI + ROS state (no shared global IMU store).
@@ -68,6 +86,7 @@ const legImuRegistry = Object.fromEntries(
 );
 
 let legImuRosTopics = [];
+let legImuZeroTopics = {};
 let legImuUiRaf = null;
 
 let ros = null;
@@ -85,6 +104,12 @@ let jetsonCpuTempTopic = null;
 let jetsonCpuLoadTopic = null;
 let plannerStatusRosTopic = null;
 let webLogTopic = null;
+let listenRosTopic = null;
+let listenMode = "topic";
+let listenUdpPort = null;
+let listenUdpBindIp = "";
+const MAX_LISTEN_LINES = 500;
+const listenBuffer = [];
 const WEB_LOG_LEGS = ["l0", "l1", "l2", "l3"];
 const MAX_WEB_LOG_LINES = 600;
 /** @type {Record<string, { time: string, text: string }[]>} */
@@ -100,54 +125,164 @@ let terminalPanelMoved = false;
 let deviceRefreshTimer = null;
 let deviceScanInFlight = false;
 let lastDeviceJson = "";
+let activeDeviceTab = "legs";
+const HOTSPOT_LEG_IP_HINTS_STORAGE_KEY = "sam-ui-hotspot-leg-ip-hints-v1";
 
-/** When hotspot scan returns no rows, show this default entry. */
-const DEFAULT_HOTSPOT_DEVICES = Object.freeze([
-  { name: "l0", ip: "10.42.0.181", status: "unknown" },
-]);
-
-/** Fixed labels for hotspot IPs when the scan has no DHCP hostname (often echoes the IP). */
-const HOTSPOT_IP_DISPLAY_NAMES = Object.freeze({
-  "10.42.0.181": "l0",
+/** Default per-leg hotspot IPs before the UI has learned a live DHCP lease. */
+const DEFAULT_HOTSPOT_LEG_IPS = Object.freeze({
+  l0: "10.42.0.10",
+  l1: "10.42.0.11",
+  l2: "10.42.0.12",
+  l3: "10.42.0.13",
 });
+let latestTrackedHotspotDevices = [];
+let latestAllHotspotDevices = [];
+let learnedHotspotLegIps = loadStoredHotspotLegIps();
 
-/** Hotspot client IPs to hide (e.g. operator laptop). Mirrors terminal-server.cjs `blockedIPs`. */
-const BLOCKED_HOTSPOT_IPS = new Set(["10.42.0.106"]);
-
-function isBlockedHotspotDevice(d) {
-  const ip = String(d?.ip || "").trim();
-  const name = String(d?.name || "").trim();
-  return BLOCKED_HOTSPOT_IPS.has(ip) || BLOCKED_HOTSPOT_IPS.has(name);
+function normalizeHotspotIp(ip) {
+  const text = String(ip || "").trim();
+  const parts = text.split(".");
+  if (parts.length !== 4) return "";
+  const nums = parts.map((part) => Number.parseInt(part, 10));
+  if (nums.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) return "";
+  return nums.join(".");
 }
 
-/** True if string is an IPv4 in 10.42.0.0/24 (hotspot client range). */
-function isHotspotSubnet10240(ipStr) {
-  const s = String(ipStr || "").trim();
-  const parts = s.split(".");
-  if (parts.length !== 4) return false;
-  const n = parts.map((p) => parseInt(p, 10));
-  if (n.some((x) => !Number.isFinite(x) || x < 0 || x > 255)) return false;
-  return n[0] === 10 && n[1] === 42 && n[2] === 0;
+function isHotspotClientIp(ip) {
+  const normalized = normalizeHotspotIp(ip);
+  return normalized.startsWith("10.42.0.") && normalized !== "10.42.0.1";
+}
+
+function loadStoredHotspotLegIps() {
+  try {
+    const raw = localStorage.getItem(HOTSPOT_LEG_IP_HINTS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const normalized = {};
+    for (const leg of WEB_LOG_LEGS) {
+      const ip = normalizeHotspotIp(parsed[leg]);
+      if (isHotspotClientIp(ip)) normalized[leg] = ip;
+    }
+    return normalized;
+  } catch (_err) {
+    return {};
+  }
+}
+
+function persistHotspotLegIps() {
+  try {
+    localStorage.setItem(HOTSPOT_LEG_IP_HINTS_STORAGE_KEY, JSON.stringify(learnedHotspotLegIps));
+  } catch (_err) {
+    // Ignore storage failures and keep runtime state only.
+  }
+}
+
+function getTrackedLegHotspotIp(leg) {
+  const key = WEB_LOG_LEGS.includes(leg) ? leg : "l0";
+  return learnedHotspotLegIps[key] || DEFAULT_HOTSPOT_LEG_IPS[key] || "";
+}
+
+function buildDefaultTrackedHotspotDevices() {
+  return WEB_LOG_LEGS.map((leg) => ({
+    name: leg,
+    ip: getTrackedLegHotspotIp(leg),
+    status: "unknown",
+  }));
+}
+
+function getHotspotDisplayName(ip) {
+  const normalizedIp = normalizeHotspotIp(ip);
+  if (!normalizedIp) return "";
+  for (const leg of WEB_LOG_LEGS) {
+    if (getTrackedLegHotspotIp(leg) === normalizedIp) return leg;
+  }
+  return "";
+}
+
+function noteConnectedHotspotDevice(ip, name = "") {
+  const normalizedIp = normalizeHotspotIp(ip);
+  if (!isHotspotClientIp(normalizedIp)) return false;
+  let changed = false;
+  let found = false;
+  latestAllHotspotDevices = latestAllHotspotDevices.map((device) => {
+    const deviceIp = normalizeHotspotIp(device?.ip);
+    if (deviceIp !== normalizedIp) return device;
+    found = true;
+    const nextName = name || device?.name || normalizedIp;
+    const nextStatus = "connected";
+    if (device?.name !== nextName || device?.status !== nextStatus) changed = true;
+    return {
+      ...device,
+      name: nextName,
+      ip: normalizedIp,
+      status: nextStatus,
+    };
+  });
+  if (!found) {
+    changed = true;
+    latestAllHotspotDevices.push({
+      name: name || normalizedIp,
+      ip: normalizedIp,
+      status: "connected",
+    });
+  }
+  return changed;
+}
+
+function learnHotspotLegIp(leg, ip) {
+  const legKey = WEB_LOG_LEGS.includes(leg) ? leg : "";
+  const normalizedIp = normalizeHotspotIp(ip);
+  if (!legKey || !isHotspotClientIp(normalizedIp)) return false;
+  const sawConnected = noteConnectedHotspotDevice(normalizedIp, legKey);
+  if (learnedHotspotLegIps[legKey] === normalizedIp) return sawConnected;
+  learnedHotspotLegIps = { ...learnedHotspotLegIps, [legKey]: normalizedIp };
+  persistHotspotLegIps();
+  return true;
 }
 
 function applyHotspotDisplayNames(devices) {
   return devices.map((d) => {
-    const ip = String(d?.ip || "").trim();
-    const label = HOTSPOT_IP_DISPLAY_NAMES[ip];
+    const ip = normalizeHotspotIp(d?.ip);
+    const label = getHotspotDisplayName(ip);
     if (!label) return d;
     return { ...d, name: label };
   });
 }
 
-function normalizeHotspotDevices(devices) {
+function buildHotspotStatusByIp(devices) {
+  const statusByIp = new Map();
+  const absorb = (list) => {
+    for (const device of Array.isArray(list) ? list : []) {
+      const ip = normalizeHotspotIp(device?.ip);
+      if (!ip) continue;
+      const status = String(device?.status || "unknown").toLowerCase();
+      const current = statusByIp.get(ip);
+      if (status === "connected" || current == null) {
+        statusByIp.set(ip, status);
+      }
+    }
+  };
+  absorb(devices);
+  absorb(latestAllHotspotDevices);
+  return statusByIp;
+}
+
+function normalizeTrackedHotspotDevices(devices) {
+  const statusByIp = buildHotspotStatusByIp(devices);
+  const tracked = buildDefaultTrackedHotspotDevices().map((device) => {
+    return {
+      ...device,
+      status: String(statusByIp.get(device.ip) || device.status || "unknown"),
+    };
+  });
+  return applyHotspotDisplayNames(tracked);
+}
+
+function normalizeAllHotspotDevices(devices) {
   const arr = Array.isArray(devices) ? devices : [];
-  const filtered = arr.filter(
-    (d) =>
-      !isBlockedHotspotDevice(d) &&
-      (isHotspotSubnet10240(d.ip) || isHotspotSubnet10240(d.name))
-  );
-  if (filtered.length === 0) return [...DEFAULT_HOTSPOT_DEVICES];
-  return applyHotspotDisplayNames(filtered);
+  const connected = arr.filter((d) => String(d?.status || "").toLowerCase() === "connected");
+  return applyHotspotDisplayNames(connected);
 }
 
 function $(id) {
@@ -157,6 +292,17 @@ function $(id) {
 function nowTime() {
   const d = new Date();
   return d.toLocaleTimeString(undefined, { hour12: false });
+}
+
+function stringifyListenValue(value) {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value == null) return "null";
+  try {
+    return JSON.stringify(value);
+  } catch (_err) {
+    return String(value);
+  }
 }
 
 let activeLogFilter = "all";
@@ -311,6 +457,7 @@ function teardownImuTopics() {
     }
   }
   legImuRosTopics = [];
+  legImuZeroTopics = {};
   if (legImuUiRaf != null) {
     cancelAnimationFrame(legImuUiRaf);
     legImuUiRaf = null;
@@ -377,13 +524,254 @@ function teardownWebLogTopic() {
   if (po) po.innerHTML = "";
 }
 
+function renderListenOutput() {
+  const output = $("listen-output");
+  if (!output) return;
+  output.textContent = listenBuffer.length > 0 ? listenBuffer.join("\n") : "\u2014";
+  output.scrollTop = output.scrollHeight;
+}
+
+function clearListenOutput() {
+  listenBuffer.length = 0;
+  renderListenOutput();
+}
+
+function appendListenOutput(line) {
+  const text = String(line || "").trimEnd();
+  if (!text) return;
+  for (const part of text.split(/\r?\n/)) {
+    const trimmed = part.trimEnd();
+    if (!trimmed) continue;
+    listenBuffer.push(`[${nowTime()}] ${trimmed}`);
+  }
+  if (listenBuffer.length > MAX_LISTEN_LINES) {
+    listenBuffer.splice(0, listenBuffer.length - MAX_LISTEN_LINES);
+  }
+  renderListenOutput();
+}
+
+function setListenStatus(text, state = "idle") {
+  const el = $("listen-status");
+  if (!el) return;
+  el.textContent = String(text || "Idle");
+  if (state) {
+    el.dataset.state = state;
+  } else {
+    delete el.dataset.state;
+  }
+}
+
+function teardownListenRosTopic() {
+  if (listenRosTopic) {
+    try {
+      listenRosTopic.unsubscribe();
+    } catch (_err) {
+      // ignore
+    }
+    listenRosTopic = null;
+  }
+}
+
+function stopUdpListener(sendStop = true) {
+  if (sendStop && listenUdpPort != null && serviceSocket?.readyState === WebSocket.OPEN) {
+    try {
+      serviceSocket.send(JSON.stringify({ type: "stop_udp_listen" }));
+    } catch (_err) {
+      // ignore
+    }
+  }
+  listenUdpPort = null;
+  listenUdpBindIp = "";
+}
+
+function stopActiveListener(options = {}) {
+  const { keepStatus = false, sendUdpStop = true } = options;
+  teardownListenRosTopic();
+  stopUdpListener(sendUdpStop);
+  if (!keepStatus) {
+    setListenStatus("Idle");
+  }
+}
+
+function setListenMode(nextMode) {
+  listenMode = nextMode === "udp" ? "udp" : "topic";
+  const topicFields = $("listen-topic-fields");
+  const udpFields = $("listen-udp-fields");
+  if (topicFields) topicFields.hidden = listenMode !== "topic";
+  if (udpFields) udpFields.hidden = listenMode !== "udp";
+  document.querySelectorAll(".listen-mode-btn").forEach((button) => {
+    const active = button.dataset.listenMode === listenMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+}
+
+function syncListenTopicPresetUi() {
+  const preset = $("listen-topic-select")?.value || "";
+  const customGroup = $("listen-custom-topic-group");
+  if (customGroup) customGroup.hidden = preset !== "__custom__";
+}
+
+function getSelectedListenTopicConfig() {
+  const presetName = String($("listen-topic-select")?.value || "").trim();
+  const type = String($("listen-topic-type")?.value || "").trim();
+  const customName = String($("listen-topic-custom")?.value || "").trim();
+  const topicName = presetName === "__custom__" ? customName : presetName;
+  return { topicName, type };
+}
+
+function startTopicListener() {
+  if (!ros || !isConnected) {
+    setListenStatus("ROS disconnected", "error");
+    appendListenOutput("ROS is not connected, so topic listening is unavailable.");
+    return;
+  }
+
+  const { topicName, type } = getSelectedListenTopicConfig();
+  if (!topicName || !type) {
+    setListenStatus("Topic or type missing", "error");
+    return;
+  }
+
+  stopActiveListener({ keepStatus: true });
+  listenRosTopic = new ROSLIB.Topic({
+    ros,
+    name: topicName,
+    messageType: type,
+  });
+  listenRosTopic.subscribe((message) => {
+    const payload =
+      message &&
+      typeof message === "object" &&
+      Object.keys(message).length === 1 &&
+      Object.prototype.hasOwnProperty.call(message, "data")
+        ? stringifyListenValue(message.data)
+        : stringifyListenValue(message);
+    appendListenOutput(`${topicName} ${payload}`);
+  });
+  setListenStatus(`Listening to ${topicName}`, "listening");
+  appendListenOutput(`Started ROS topic listener on ${topicName} (${type}).`);
+}
+
+async function startUdpListener() {
+  const portText = String($("listen-port")?.value || "").trim();
+  const bindIp = String($("listen-bind-ip")?.value || "").trim() || "0.0.0.0";
+  const port = Number.parseInt(portText, 10);
+
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    setListenStatus("Invalid UDP port", "error");
+    return;
+  }
+
+  const { gatewayUrl } = getTerminalConnectionConfig();
+  if (!gatewayUrl) {
+    setListenStatus("Gateway missing", "error");
+    appendListenOutput("Configure the terminal gateway before starting a UDP listener.");
+    return;
+  }
+
+  try {
+    await connectServiceGateway(gatewayUrl);
+  } catch (err) {
+    setListenStatus("Gateway unavailable", "error");
+    appendListenOutput(err.message || "Failed to connect to terminal gateway.");
+    return;
+  }
+
+  stopActiveListener({ keepStatus: true, sendUdpStop: false });
+  try {
+    serviceSocket.send(
+      JSON.stringify({
+        type: "listen_udp",
+        udp_port: port,
+        bind_ip: bindIp,
+      })
+    );
+    listenUdpPort = port;
+    listenUdpBindIp = bindIp;
+    setListenStatus(`Starting UDP ${bindIp}:${port}`, "listening");
+    appendListenOutput(`Requested UDP listener on ${bindIp}:${port}.`);
+  } catch (err) {
+    listenUdpPort = null;
+    listenUdpBindIp = "";
+    setListenStatus("UDP start failed", "error");
+    appendListenOutput(err.message || "Failed to request UDP listener.");
+  }
+}
+
+function populateListenTopicPresets() {
+  const select = $("listen-topic-select");
+  if (!(select instanceof HTMLSelectElement)) return;
+  select.innerHTML = "";
+  for (const preset of LISTEN_TOPIC_PRESETS) {
+    const option = document.createElement("option");
+    option.value = preset.name;
+    option.textContent = `${preset.label} — ${preset.type}`;
+    option.dataset.messageType = preset.type;
+    select.appendChild(option);
+  }
+  select.value = CONFIG.ros.webLogTopic;
+  const typeInput = $("listen-topic-type");
+  if (typeInput) typeInput.value = CONFIG.ros.commandMessageType;
+  syncListenTopicPresetUi();
+}
+
+function setupListenPanel() {
+  populateListenTopicPresets();
+  setListenMode("topic");
+  renderListenOutput();
+
+  document.querySelectorAll(".listen-mode-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      setListenMode(button.dataset.listenMode || "topic");
+    });
+  });
+
+  $("listen-topic-select")?.addEventListener("change", (event) => {
+    const select = event.currentTarget;
+    if (!(select instanceof HTMLSelectElement)) return;
+    const selected = select.selectedOptions[0];
+    const type = selected?.dataset.messageType || CONFIG.ros.commandMessageType;
+    const typeInput = $("listen-topic-type");
+    if (typeInput && select.value !== "__custom__") {
+      typeInput.value = type;
+    }
+    syncListenTopicPresetUi();
+  });
+
+  $("listen-start-btn")?.addEventListener("click", () => {
+    if (listenMode === "udp") {
+      startUdpListener();
+    } else {
+      startTopicListener();
+    }
+  });
+
+  $("listen-stop-btn")?.addEventListener("click", () => {
+    const hadRosTopic = Boolean(listenRosTopic);
+    const hadUdp = listenUdpPort != null;
+    stopActiveListener();
+    if (hadRosTopic || hadUdp) {
+      appendListenOutput("Stopped active listener.");
+    }
+  });
+
+  $("listen-clear-btn")?.addEventListener("click", clearListenOutput);
+}
+
 function cleanupRosState() {
+  const hadListenRosTopic = Boolean(listenRosTopic);
   teardownTrajectoryTopics();
   teardownImuTopics();
   teardownLegEnableTopics();
   teardownJetsonLoadTopics();
   teardownPlannerStatusTopics();
   teardownWebLogTopic();
+  teardownListenRosTopic();
+  if (hadListenRosTopic) {
+    setListenStatus("ROS disconnected", "error");
+    appendListenOutput("ROS disconnected; topic listener stopped.");
+  }
   isConnected = false;
   commandTopic = null;
   testingTopic = null;
@@ -555,15 +943,21 @@ function normalizeWebLogLeg(leg) {
   return WEB_LOG_LEGS.includes(L) ? L : "l0";
 }
 
+function maybeNormalizeWebLogLeg(leg) {
+  const L = typeof leg === "string" ? leg.trim().toLowerCase() : "";
+  return WEB_LOG_LEGS.includes(L) ? L : null;
+}
+
 /**
  * Parse `/web/log` std_msgs/String.
- * Primary JSON shape: { "source_ip": "...", "leg_id": "l1", "message": "..." }.
- * Also accepts leg_id / legId / leg, and message / msg / text / line.
+ * Primary JSON shape: { "ip": "...", "leg_id": "l1", "message": "..." }.
+ * Also accepts source_ip / pico_ip, leg_id / legId / leg, and message / msg / text / line.
  */
 function tryParseWebLogJsonObject(j) {
   if (!j || typeof j !== "object") return null;
   const legRaw = j.leg_id ?? j.legId ?? j.leg;
-  const leg = typeof legRaw === "string" ? legRaw.trim().toLowerCase() : "";
+  const knownLeg = maybeNormalizeWebLogLeg(legRaw);
+  const ip = normalizeHotspotIp(j.ip ?? j.source_ip ?? j.sourceIp ?? j.pico_ip ?? j.picoIp);
   const text =
     j.message ??
     j.msg ??
@@ -571,7 +965,7 @@ function tryParseWebLogJsonObject(j) {
     j.line ??
     (typeof j.data === "string" ? j.data : null);
   if (text == null) return null;
-  return { leg: normalizeWebLogLeg(leg), text: String(text) };
+  return { leg: knownLeg || "l0", legHint: knownLeg, ip: ip || null, text: String(text) };
 }
 
 function parseWebLogPayload(dataStr) {
@@ -586,13 +980,18 @@ function parseWebLogPayload(dataStr) {
   }
   const pipe = /^(l[0-3])\s*[|:\t]\s*([\s\S]*)$/i.exec(trimmed);
   if (pipe) {
-    return { leg: pipe[1].toLowerCase(), text: pipe[2] };
+    return { leg: pipe[1].toLowerCase(), legHint: pipe[1].toLowerCase(), ip: null, text: pipe[2] };
   }
   const bracket = /^\[(l[0-3])\]\s*([\s\S]*)$/i.exec(trimmed);
   if (bracket) {
-    return { leg: bracket[1].toLowerCase(), text: bracket[2] };
+    return {
+      leg: bracket[1].toLowerCase(),
+      legHint: bracket[1].toLowerCase(),
+      ip: null,
+      text: bracket[2],
+    };
   }
-  return { leg: "l0", text: trimmed };
+  return { leg: "l0", legHint: null, ip: null, text: trimmed };
 }
 
 function appendWebLogEntry(leg, text) {
@@ -666,7 +1065,11 @@ function initWebLogTopic() {
     for (const part of raw.split(/\r?\n/)) {
       const line = part.trim();
       if (!line) continue;
-      const { leg, text } = parseWebLogPayload(line);
+      const { leg, legHint, ip, text } = parseWebLogPayload(line);
+      if (legHint && ip && learnHotspotLegIp(legHint, ip)) {
+        lastDeviceJson = "";
+        renderDeviceStatuses();
+      }
       appendWebLogEntry(leg, text);
     }
   });
@@ -1091,16 +1494,45 @@ function applyRollPitchDisplayForLeg(legId) {
   r.latestRollPitchReadout = `roll ${r.rollDeg.toFixed(2)}\u00b0 \u00b7 pitch ${r.pitchDeg.toFixed(2)}\u00b0`;
 }
 
-/** Set current sensor roll/pitch as the new 0° reference (display, stance viz, 3D Render). */
+/** Ask each per-leg ROS IMU node to make its current roll/pitch the shared 0° reference. */
 function zeroImuRollPitchDisplay() {
+  let publishCount = 0;
   for (const id of CONFIG.legs) {
     const r = legImuRegistry[id];
-    r.rollPitchZeroRoll = Number.isFinite(r.rollDegSensor) ? r.rollDegSensor : 0;
-    r.rollPitchZeroPitch = Number.isFinite(r.pitchDegSensor) ? r.pitchDegSensor : 0;
+    r.rollPitchZeroRoll = 0;
+    r.rollPitchZeroPitch = 0;
     applyRollPitchDisplayForLeg(id);
+
+    const zeroTopic = legImuZeroTopics[id];
+    if (zeroTopic) {
+      zeroTopic.publish({});
+      publishCount += 1;
+    }
   }
   scheduleLegImuUiUpdate();
-  logLine("GYRO", "Roll/pitch display zeroed (current attitude is now 0° reference per leg)", "info");
+  if (publishCount > 0) {
+    logLine("GYRO", "Shared roll/pitch zero command sent to ROS IMU nodes", "info");
+  } else {
+    logLine("GYRO", "Could not send shared zero command because ROS IMU topics are not connected", "error");
+  }
+}
+
+function toggleGyroImuDetails() {
+  const btn = $("gyro-toggle-imu-details-btn");
+  const detailBlocks = document.querySelectorAll(".gyro-imu-detail");
+  if (!btn || detailBlocks.length === 0) return;
+
+  const isExpanded = btn.getAttribute("aria-expanded") !== "false";
+  const nextExpanded = !isExpanded;
+  btn.setAttribute("aria-expanded", String(nextExpanded));
+  btn.classList.toggle("is-active", nextExpanded);
+  btn.title = nextExpanded
+    ? "Hide per-leg /imu/data details"
+    : "Show per-leg /imu/data details";
+
+  detailBlocks.forEach((block) => {
+    block.hidden = !nextExpanded;
+  });
 }
 
 function scheduleLegImuUiUpdate() {
@@ -1137,6 +1569,7 @@ function initGyroTopics() {
 
   const imuType = CONFIG.ros.imuMessageType;
   const rpType = CONFIG.ros.imuRollPitchMessageType;
+  const emptyType = CONFIG.ros.emptyMessageType;
 
   for (const legId of CONFIG.legs) {
     const paths = legImuTopics[legId];
@@ -1183,6 +1616,12 @@ function initGyroTopics() {
       scheduleLegImuUiUpdate();
     });
     legImuRosTopics.push(tRaw);
+
+    legImuZeroTopics[legId] = new ROSLIB.Topic({
+      ros,
+      name: paths.zero,
+      messageType: emptyType,
+    });
   }
 
   scheduleLegImuUiUpdate();
@@ -1198,12 +1637,378 @@ const CMD_FIELDS = {
   home:   [],
   rate:   ["value"],
   raw:    ["command"],
-  walk:   ["distance"],
+  walk:   ["count"],
 };
 
 const CMD_DEFAULTS = {
-  inner: 0, outer: 0, servo: 0, value: 0, command: "", distance: "5",
+  inner: 0, outer: 0, servo: 0, value: 0, command: "", count: "5",
 };
+
+const WALK_SEQUENCE_AXIS_LABELS = Object.freeze(["I", "O", "H", "Y", "P", "R"]);
+
+const DEFAULT_WALK_SEQUENCE = [
+  [
+    [0, 0, 0, 0, 0, 0],
+    [0, 0, 30, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0],
+  ],
+  [
+    [0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0],
+  ],
+];
+
+const WALK_SEQUENCE_STORAGE_KEY = "sam-ui-walk-sequence-v1";
+
+function buildDefaultWalkSequenceText() {
+  return JSON.stringify(DEFAULT_WALK_SEQUENCE, null, 2);
+}
+
+function cloneWalkSequence(sequence) {
+  return sequence.map((pose) => pose.map((legValues) => legValues.map((value) => value)));
+}
+
+function createEmptyWalkPose() {
+  return CONFIG.legs.map(() => WALK_SEQUENCE_AXIS_LABELS.map(() => 0));
+}
+
+function resizeWalkSequence(sequence, stepCount) {
+  const nextStepCount = Math.max(1, Number.parseInt(stepCount, 10) || 1);
+  const resized = [];
+  for (let stepIndex = 0; stepIndex < nextStepCount; stepIndex += 1) {
+    const pose = sequence[stepIndex];
+    resized.push(Array.isArray(pose) ? cloneWalkSequence([pose])[0] : createEmptyWalkPose());
+  }
+  return resized;
+}
+
+function loadStoredWalkSequenceText() {
+  try {
+    const raw = localStorage.getItem(WALK_SEQUENCE_STORAGE_KEY);
+    if (typeof raw === "string" && raw.trim()) {
+      return raw;
+    }
+  } catch (err) {
+    console.warn("[cmd] Could not read saved walk sequence", err);
+  }
+  return buildDefaultWalkSequenceText();
+}
+
+function persistWalkSequenceText(rawText) {
+  try {
+    localStorage.setItem(WALK_SEQUENCE_STORAGE_KEY, rawText);
+  } catch (err) {
+    console.warn("[cmd] Could not persist walk sequence", err);
+  }
+}
+
+function normalizeWalkSequence(rawValue) {
+  if (!Array.isArray(rawValue) || rawValue.length === 0) {
+    throw new Error("Walk sequence must be a non-empty array of poses.");
+  }
+
+  return rawValue.map((pose, poseIndex) => {
+    if (!Array.isArray(pose) || pose.length !== CONFIG.legs.length) {
+      throw new Error(
+        `Walk pose ${poseIndex + 1} must include ${CONFIG.legs.length} leg rows.`
+      );
+    }
+
+    return pose.map((legValues, legIndex) => {
+      if (!Array.isArray(legValues) || legValues.length !== WALK_SEQUENCE_AXIS_LABELS.length) {
+        throw new Error(
+          `Walk pose ${poseIndex + 1} ${CONFIG.legs[legIndex].toUpperCase()} must include ${WALK_SEQUENCE_AXIS_LABELS.length} values.`
+        );
+      }
+
+      return legValues.map((axisValue, axisIndex) => {
+        const numeric =
+          typeof axisValue === "number"
+            ? axisValue
+            : Number.parseFloat(String(axisValue ?? "").trim());
+        if (!Number.isFinite(numeric)) {
+          throw new Error(
+            `Walk pose ${poseIndex + 1} ${CONFIG.legs[legIndex].toUpperCase()}[${axisIndex}] must be numeric.`
+          );
+        }
+        return numeric;
+      });
+    });
+  });
+}
+
+function parseWalkSequenceInput(rawText) {
+  let parsed;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch (_err) {
+    throw new Error("Walk sequence must be valid JSON.");
+  }
+  return normalizeWalkSequence(parsed);
+}
+
+function updateWalkSequenceStatus() {
+  const textarea = $("cmd-f-walk-sequence");
+  const status = $("cmd-walk-sequence-status");
+  const summary = $("cmd-walk-sequence-summary");
+  const stepCountInput = $("cmd-walk-step-count");
+  if (!status) return;
+  if (!(textarea instanceof HTMLTextAreaElement)) {
+    status.textContent = "";
+    delete status.dataset.state;
+    if (summary) {
+      summary.textContent = "Sequence table";
+    }
+    return;
+  }
+
+  persistWalkSequenceText(textarea.value);
+
+  try {
+    const normalized = parseWalkSequenceInput(textarea.value);
+    const label = normalized.length === 1 ? "pose" : "poses";
+    status.textContent = `${normalized.length} ${label} ready for the next walk command.`;
+    status.dataset.state = "valid";
+    if (summary) {
+      const stepLabel = normalized.length === 1 ? "step" : "steps";
+      summary.textContent = `Sequence table · ${normalized.length} ${stepLabel}`;
+    }
+    if (stepCountInput instanceof HTMLInputElement && document.activeElement !== stepCountInput) {
+      stepCountInput.value = String(normalized.length);
+    }
+  } catch (err) {
+    status.textContent = err instanceof Error ? err.message : "Walk sequence is invalid.";
+    status.dataset.state = "error";
+    if (summary) {
+      summary.textContent = "Sequence table · invalid";
+    }
+  }
+}
+
+function syncWalkSequenceText(sequence, options = {}) {
+  const textarea = $("cmd-f-walk-sequence");
+  if (!(textarea instanceof HTMLTextAreaElement)) return;
+  const normalized = normalizeWalkSequence(sequence);
+  textarea.value = JSON.stringify(normalized, null, 2);
+  persistWalkSequenceText(textarea.value);
+  updateWalkSequenceStatus();
+  if (options.render !== false) {
+    renderWalkSequenceTableEditor(normalized);
+  }
+}
+
+function renderWalkSequenceTableEditor(sequenceOverride = null) {
+  const container = $("cmd-walk-sequence-content");
+  const textarea = $("cmd-f-walk-sequence");
+  if (!container || !(textarea instanceof HTMLTextAreaElement)) return;
+
+  container.innerHTML = "";
+
+  const emptyState = document.createElement("div");
+  emptyState.id = "cmd-walk-sequence-empty";
+  emptyState.className = "cmd-walk-sequence-empty";
+  emptyState.hidden = true;
+  container.appendChild(emptyState);
+
+  let normalized;
+  try {
+    normalized =
+      sequenceOverride != null ? normalizeWalkSequence(sequenceOverride) : parseWalkSequenceInput(textarea.value);
+  } catch (err) {
+    if (emptyState) {
+      emptyState.hidden = false;
+      emptyState.textContent = err instanceof Error ? err.message : "Walk sequence is invalid.";
+    }
+    return;
+  }
+
+  if (emptyState) {
+    emptyState.hidden = true;
+    emptyState.textContent = "";
+  }
+
+  CONFIG.legs.forEach((legId, legIndex) => {
+    const panel = document.createElement("section");
+    panel.className = "cmd-walk-leg-panel";
+    const legInputs = [];
+
+    const heading = document.createElement("div");
+    heading.className = "cmd-walk-leg-heading";
+    heading.textContent = legId.toUpperCase();
+    panel.appendChild(heading);
+
+    const scroller = document.createElement("div");
+    scroller.className = "cmd-walk-table-scroller";
+
+    const table = document.createElement("table");
+    table.className = "cmd-walk-sequence-table";
+    table.setAttribute("aria-label", `${legId.toUpperCase()} walk sequence table`);
+
+    const thead = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+    const stepHeader = document.createElement("th");
+    stepHeader.scope = "col";
+    stepHeader.textContent = "Step";
+    headerRow.appendChild(stepHeader);
+
+    WALK_SEQUENCE_AXIS_LABELS.forEach((axisLabel) => {
+      const th = document.createElement("th");
+      th.scope = "col";
+      th.textContent = axisLabel;
+      headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement("tbody");
+    normalized.forEach((pose, stepIndex) => {
+      const row = document.createElement("tr");
+      const rowLabel = document.createElement("th");
+      rowLabel.scope = "row";
+      rowLabel.textContent = `Step ${stepIndex + 1}`;
+      row.appendChild(rowLabel);
+
+      WALK_SEQUENCE_AXIS_LABELS.forEach((axisLabel, axisIndex) => {
+        const cell = document.createElement("td");
+        const input = document.createElement("input");
+        input.type = "number";
+        input.step = "any";
+        input.className = "cmd-walk-cell-input";
+        input.value = String(pose[legIndex][axisIndex] ?? 0);
+        input.setAttribute(
+          "aria-label",
+          `${legId.toUpperCase()} step ${stepIndex + 1} axis ${axisLabel}`
+        );
+        input.addEventListener("focus", () => input.select());
+        input.addEventListener("input", () => {
+          const raw = String(input.value ?? "").trim();
+          const numeric = raw === "" ? 0 : Number.parseFloat(raw);
+          normalized[stepIndex][legIndex][axisIndex] = Number.isFinite(numeric) ? numeric : 0;
+          syncWalkSequenceText(normalized, { render: false });
+        });
+        input.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter") {
+            return;
+          }
+          event.preventDefault();
+          const rowOffset = event.shiftKey ? -1 : 1;
+          const targetInput = legInputs[stepIndex + rowOffset]?.[axisIndex];
+          if (targetInput instanceof HTMLInputElement) {
+            targetInput.focus();
+            targetInput.select();
+          }
+        });
+        legInputs[stepIndex] ??= [];
+        legInputs[stepIndex][axisIndex] = input;
+        cell.appendChild(input);
+        row.appendChild(cell);
+      });
+
+      tbody.appendChild(row);
+    });
+    table.appendChild(tbody);
+    scroller.appendChild(table);
+    panel.appendChild(scroller);
+    container.appendChild(panel);
+  });
+}
+
+function resetWalkSequenceEditor() {
+  syncWalkSequenceText(DEFAULT_WALK_SEQUENCE);
+}
+
+function appendWalkSequenceEditor(container) {
+  const group = document.createElement("div");
+  group.className = "field-group field-group-wide";
+
+  const header = document.createElement("div");
+  header.className = "cmd-inline-actions";
+
+  const lbl = document.createElement("label");
+  lbl.setAttribute("for", "cmd-f-walk-sequence");
+  lbl.textContent = "sequence";
+
+  const resetBtn = document.createElement("button");
+  resetBtn.type = "button";
+  resetBtn.className = "cmd-inline-btn";
+  resetBtn.textContent = "Reset Default";
+  resetBtn.addEventListener("click", resetWalkSequenceEditor);
+
+  header.appendChild(lbl);
+  header.appendChild(resetBtn);
+
+  const controls = document.createElement("div");
+  controls.className = "cmd-walk-sequence-controls";
+
+  const stepGroup = document.createElement("label");
+  stepGroup.className = "cmd-walk-step-count";
+  stepGroup.setAttribute("for", "cmd-walk-step-count");
+  stepGroup.textContent = "Steps";
+
+  const stepInput = document.createElement("input");
+  stepInput.id = "cmd-walk-step-count";
+  stepInput.type = "number";
+  stepInput.min = "1";
+  stepInput.step = "1";
+  stepInput.value = "1";
+  stepInput.setAttribute("aria-label", "Number of walk sequence steps");
+  const handleStepCountChange = () => {
+    const textarea = $("cmd-f-walk-sequence");
+    if (!(textarea instanceof HTMLTextAreaElement)) return;
+    const nextCount = Number.parseInt(stepInput.value, 10);
+    if (!Number.isFinite(nextCount) || nextCount < 1) return;
+    try {
+      const normalized = parseWalkSequenceInput(textarea.value);
+      syncWalkSequenceText(resizeWalkSequence(normalized, nextCount));
+    } catch (_err) {
+      resetWalkSequenceEditor();
+    }
+  };
+  stepInput.addEventListener("change", handleStepCountChange);
+  stepInput.addEventListener("input", handleStepCountChange);
+
+  stepGroup.appendChild(stepInput);
+  controls.appendChild(stepGroup);
+
+  const details = document.createElement("details");
+  details.className = "cmd-walk-sequence-window";
+  details.open = true;
+
+  const summary = document.createElement("summary");
+  summary.id = "cmd-walk-sequence-summary";
+  summary.textContent = "Sequence table";
+
+  const content = document.createElement("div");
+  content.id = "cmd-walk-sequence-content";
+  content.className = "cmd-walk-sequence-content";
+  details.appendChild(summary);
+  details.appendChild(content);
+
+  const textarea = document.createElement("textarea");
+  textarea.id = "cmd-f-walk-sequence";
+  textarea.className = "cmd-walk-sequence-input";
+  textarea.hidden = true;
+  textarea.rows = 10;
+  textarea.spellcheck = false;
+  textarea.value = loadStoredWalkSequenceText();
+
+  const status = document.createElement("div");
+  status.id = "cmd-walk-sequence-status";
+  status.className = "cmd-inline-status";
+
+  group.appendChild(header);
+  group.appendChild(controls);
+  group.appendChild(details);
+  group.appendChild(textarea);
+  group.appendChild(status);
+  container.appendChild(group);
+
+  updateWalkSequenceStatus();
+  renderWalkSequenceTableEditor();
+}
 
 function buildCmdFields() {
   const type = $("cmd-type").value;
@@ -1240,7 +2045,8 @@ function buildCmdFields() {
     } else {
       input = document.createElement("input");
       input.type = "number";
-      input.step = "any";
+      input.step = field === "count" ? "1" : "any";
+      if (field === "count") input.min = "1";
       input.id = `cmd-f-${field}`;
       input.value = CMD_DEFAULTS[field] ?? 0;
       input.addEventListener("focus", () => input.select());
@@ -1251,6 +2057,10 @@ function buildCmdFields() {
     container.appendChild(group);
   });
 
+  if (type === "walk") {
+    appendWalkSequenceEditor(container);
+  }
+
   updateCmdPreview();
 }
 
@@ -1259,9 +2069,18 @@ function buildCmdPayload() {
   const leg = $("cmd-leg")?.value ?? "l0";
 
   if (type === "walk") {
-    const el = document.getElementById("cmd-f-distance");
-    const distance = el ? String(el.value || "").trim() || "5" : "5";
-    return { type: "walk", distance };
+    const countEl = $("cmd-f-count");
+    const count = countEl ? String(countEl.value || "").trim() || "5" : "5";
+    const sequenceEl = $("cmd-f-walk-sequence");
+    const sequenceText =
+      sequenceEl instanceof HTMLTextAreaElement
+        ? sequenceEl.value
+        : buildDefaultWalkSequenceText();
+    return {
+      type: "walk",
+      count,
+      sequence: parseWalkSequenceInput(sequenceText),
+    };
   }
 
   if (type === "move") {
@@ -1290,7 +2109,11 @@ function buildCmdPayload() {
   return payload;
 }
 
-function updateCmdPreview() {}
+function updateCmdPreview() {
+  if ($("cmd-type")?.value === "walk") {
+    updateWalkSequenceStatus();
+  }
+}
 
 /** Saved command chips (Commands panel); persisted in localStorage. */
 const SAVED_CMDS_STORAGE_KEY = "sam-ui-saved-commands-v1";
@@ -1428,7 +2251,14 @@ function publishPayload(dataStr) {
 }
 
 function sendBuiltCommand() {
-  const payload = buildCmdPayload();
+  let payload;
+  try {
+    payload = buildCmdPayload();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Could not build command.";
+    logLine("CMD", message, "error");
+    return;
+  }
   let dataStr = JSON.stringify(payload);
 
   if (payload.allLegs && payload.type === "move") {
@@ -1458,7 +2288,14 @@ function addSavedCommand() {
   const nameTrim = name.trim();
   if (!nameTrim) return;
 
-  const payload = buildCmdPayload();
+  let payload;
+  try {
+    payload = buildCmdPayload();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Could not save command.";
+    logLine("CMD", message, "error");
+    return;
+  }
   const json = JSON.stringify(payload);
   installSavedCommandChip(nameTrim, json);
 }
@@ -1539,10 +2376,10 @@ function setupCommandForm() {
 }
 
 const LEGS = [
-  { id: "L0", label: "Leg 0", hasInner: true, hasOuter: false },
+  { id: "L0", label: "Leg 0", hasInner: false, hasOuter: true, hasServo: false },
   { id: "L1", label: "Leg 1", hasInner: true, hasOuter: true },
   { id: "L2", label: "Leg 2", hasInner: true, hasOuter: true },
-  { id: "L3", label: "Leg 3", hasInner: true, hasOuter: false, hasServo: false },
+  { id: "L3", label: "Leg 3", hasInner: true, hasOuter: false, hasServo: true },
 ];
 
 function getLegValues(legId) {
@@ -1747,6 +2584,8 @@ function snapshotPanelLayout(panel) {
     top: panel.style.top || "",
     right: panel.style.right || "",
     bottom: panel.style.bottom || "",
+    width: panel.style.width || "",
+    height: panel.style.height || "",
     zIndex: panel.style.zIndex || "",
     placed: panel.dataset.placed === "1",
   };
@@ -1775,6 +2614,8 @@ function clearPanelPositionStyles(panel) {
   panel.style.top = "";
   panel.style.right = "";
   panel.style.bottom = "";
+  panel.style.width = "";
+  panel.style.height = "";
   panel.style.transform = "";
   panel.style.zIndex = "";
   delete panel.dataset.placed;
@@ -1790,6 +2631,8 @@ function applyPanelSnapshotStyles(panel, snap) {
   panel.style.top = typeof snap.top === "string" ? snap.top : "";
   panel.style.right = typeof snap.right === "string" ? snap.right : "";
   panel.style.bottom = typeof snap.bottom === "string" ? snap.bottom : "";
+  panel.style.width = typeof snap.width === "string" ? snap.width : "";
+  panel.style.height = typeof snap.height === "string" ? snap.height : "";
   panel.style.transform = "";
   if (typeof snap.zIndex === "string" && snap.zIndex) panel.style.zIndex = snap.zIndex;
   else panel.style.zIndex = "";
@@ -1922,7 +2765,9 @@ function downloadUILayoutFile() {
 function setupUILayoutPersistence() {
   document.querySelectorAll(".quick-panel").forEach((panel) => {
     const mo = new MutationObserver(() => scheduleSaveUILayout());
-    mo.observe(panel, { attributes: true, attributeFilter: ["hidden"] });
+    mo.observe(panel, { attributes: true, attributeFilter: ["hidden", "style"] });
+    const ro = new ResizeObserver(() => scheduleSaveUILayout());
+    ro.observe(panel);
   });
 
   document.querySelectorAll('input[name="robot-render-layout"]').forEach((radio) => {
@@ -2276,27 +3121,25 @@ function setupPanelLauncher() {
   }
 }
 
-function renderDeviceStatuses(devices) {
+function renderDeviceStatuses() {
   const body = $("device-status-body");
   const countEl = $("device-count");
   if (!body) return;
 
-  const list = normalizeHotspotDevices(devices);
-  const sorted = [...list].sort((a, b) => {
-    const statusOrder = { connected: 0, unreachable: 1, disconnected: 2, unknown: 3 };
-    const sa = statusOrder[a.status] ?? 3;
-    const sb = statusOrder[b.status] ?? 3;
-    if (sa !== sb) return sa - sb;
-    return (a.name || a.ip || "").localeCompare(b.name || b.ip || "");
-  });
+  const legsList = normalizeTrackedHotspotDevices(latestTrackedHotspotDevices);
+  const allList = normalizeAllHotspotDevices(latestAllHotspotDevices);
+  const list =
+    activeDeviceTab === "all"
+      ? [...allList].sort((a, b) => (a.name || a.ip || "").localeCompare(b.name || b.ip || ""))
+      : legsList;
 
-  const json = JSON.stringify(sorted);
+  const json = JSON.stringify({ tab: activeDeviceTab, list });
   if (json === lastDeviceJson) return;
   lastDeviceJson = json;
 
   body.innerHTML = "";
 
-  sorted.forEach((entry) => {
+  list.forEach((entry) => {
     const tr = document.createElement("tr");
     const status = String(entry.status || "unknown").toLowerCase();
 
@@ -2316,6 +3159,16 @@ function renderDeviceStatuses(devices) {
     body.appendChild(tr);
   });
 
+  if (list.length === 0) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 3;
+    td.className = "hint";
+    td.textContent = "No connected hotspot devices";
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+
   const connectedCount = list.filter((d) => d.status === "connected").length;
   if (countEl) {
     countEl.textContent = `${connectedCount} connected, ${list.length} total`;
@@ -2324,6 +3177,7 @@ function renderDeviceStatuses(devices) {
 
 function disconnectTerminalGatewaySockets() {
   deviceScanInFlight = false;
+  const hadUdpListener = listenUdpPort != null;
   if (serviceSocket && serviceSocket.readyState <= WebSocket.OPEN) {
     try {
       serviceSocket.close();
@@ -2333,6 +3187,10 @@ function disconnectTerminalGatewaySockets() {
   }
   serviceSocket = null;
   serviceSocketUrl = "";
+  stopUdpListener(false);
+  if (hadUdpListener) {
+    setListenStatus("UDP listener disconnected", "error");
+  }
   for (const tab of terminalTabs) {
     tab.shellReady = false;
     if (tab.ws && tab.ws.readyState <= WebSocket.OPEN) {
@@ -2403,13 +3261,14 @@ async function requestDeviceScan() {
   if (deviceScanInFlight) return;
 
   const { gatewayUrl, host, port, username, password } = getTerminalConnectionConfig();
-  if (!gatewayUrl || !host || !username || !password) {
+  if (!gatewayUrl || !host || !username) {
     return;
   }
 
   deviceScanInFlight = true;
   try {
     await connectServiceGateway(gatewayUrl);
+    const knownIps = buildDefaultTrackedHotspotDevices().map((device) => device.ip).filter(Boolean);
     serviceSocket.send(
       JSON.stringify({
         type: "scan_hotspot",
@@ -2417,6 +3276,8 @@ async function requestDeviceScan() {
         port,
         username,
         password,
+        known_ips: knownIps,
+        include_all: true,
       })
     );
   } catch (err) {
@@ -2454,10 +3315,16 @@ function connectServiceGateway(gatewayUrl) {
     });
 
     serviceSocket.addEventListener("close", () => {
+      const hadUdpListener = listenUdpPort != null;
+      stopUdpListener(false);
       serviceSocket = null;
       serviceSocketUrl = "";
       updateTerminalStatusFromTabs();
       logLine("TERM", "Service gateway disconnected");
+      if (hadUdpListener) {
+        setListenStatus("UDP listener disconnected", "error");
+        appendListenOutput("Terminal gateway disconnected; UDP listener stopped.");
+      }
     });
 
     serviceSocket.addEventListener("error", () => {
@@ -2473,11 +3340,32 @@ function connectServiceGateway(gatewayUrl) {
         return;
       }
       if (payload.type === "device_scan_result") {
-        renderDeviceStatuses(payload.devices || []);
+        latestTrackedHotspotDevices = payload.tracked_devices || payload.devices || [];
+        latestAllHotspotDevices = payload.all_devices || [];
+        renderDeviceStatuses();
         deviceScanInFlight = false;
       } else if (payload.type === "device_scan_error") {
         logLine("DEV", payload.message || "Device scan failed", "error");
         deviceScanInFlight = false;
+      } else if (payload.type === "udp_listener_started") {
+        listenUdpPort = Number.parseInt(payload.udp_port, 10) || listenUdpPort;
+        listenUdpBindIp = String(payload.bind_ip || listenUdpBindIp || "0.0.0.0");
+        setListenStatus(`Listening on ${listenUdpBindIp}:${listenUdpPort}`, "listening");
+        appendListenOutput(`UDP listener active on ${listenUdpBindIp}:${listenUdpPort}.`);
+      } else if (payload.type === "udp_packet") {
+        const sourceIp = String(payload.source_ip || "unknown");
+        const sourcePort = String(payload.source_port || "?");
+        const data = String(payload.data || "");
+        appendListenOutput(`${sourceIp}:${sourcePort} ${data}`);
+      } else if (payload.type === "udp_listener_stopped") {
+        const port = payload.udp_port ?? listenUdpPort ?? "?";
+        stopUdpListener(false);
+        setListenStatus("Idle");
+        appendListenOutput(`UDP listener stopped on port ${port}.`);
+      } else if (payload.type === "udp_listener_error") {
+        stopUdpListener(false);
+        setListenStatus(payload.message || "UDP listener error", "error");
+        appendListenOutput(payload.message || "UDP listener error");
       }
     });
   });
@@ -2519,7 +3407,7 @@ function installPanelCloseButtons() {
       const launcherBtn = document.querySelector(`[data-panel-target="${panelId}"]`);
       if (launcherBtn) launcherBtn.setAttribute("aria-expanded", "false");
     });
-    const actionGroup = handle.querySelector(".terminal-header-actions");
+    const actionGroup = handle.querySelector(".terminal-header-actions, .panel-header-actions");
     if (actionGroup) {
       actionGroup.appendChild(btn);
     } else {
@@ -2833,6 +3721,7 @@ function setupTerminalForm() {
   const passwordInput = $("terminal-password");
   const refreshDevicesBtn = $("refresh-devices-btn");
   const autoRefreshDevices = $("auto-refresh-devices");
+  const deviceTabButtons = document.querySelectorAll("[data-device-tab]");
 
   if (gatewaySelect) {
     try {
@@ -2878,6 +3767,20 @@ function setupTerminalForm() {
   if (refreshDevicesBtn) {
     refreshDevicesBtn.addEventListener("click", () => requestDeviceScan());
   }
+  if (deviceTabButtons.length > 0) {
+    deviceTabButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const nextTab = String(button.dataset.deviceTab || "legs");
+        activeDeviceTab = nextTab === "all" ? "all" : "legs";
+        deviceTabButtons.forEach((candidate) => {
+          const active = candidate === button;
+          candidate.classList.toggle("active", active);
+          candidate.setAttribute("aria-selected", active ? "true" : "false");
+        });
+        renderDeviceStatuses();
+      });
+    });
+  }
   if (autoRefreshDevices) {
     autoRefreshDevices.addEventListener("change", () => {
       if (deviceRefreshTimer) {
@@ -2886,11 +3789,11 @@ function setupTerminalForm() {
       }
       if (autoRefreshDevices.checked) {
         requestDeviceScan();
-        deviceRefreshTimer = setInterval(requestDeviceScan, 5000);
+        deviceRefreshTimer = setInterval(requestDeviceScan, 2000);
       }
     });
     if (autoRefreshDevices.checked) {
-      deviceRefreshTimer = setInterval(requestDeviceScan, 5000);
+      deviceRefreshTimer = setInterval(requestDeviceScan, 2000);
     }
   }
 
@@ -2914,7 +3817,7 @@ function setupTerminalForm() {
 
   appendToTab(0, "S.A.A.M. Jetson terminal ready.\r\n");
 
-  renderDeviceStatuses([]);
+  renderDeviceStatuses();
   requestDeviceScan();
 
   setTimeout(() => {
@@ -2926,10 +3829,35 @@ function setupTerminalForm() {
 }
 
 function setupInitialFocus() {
+  if (new URLSearchParams(window.location.search).get("popout") === "commands") {
+    const typeSelect = $("cmd-type");
+    if (typeSelect instanceof HTMLSelectElement) {
+      typeSelect.focus();
+      return;
+    }
+  }
   const launcherButton = document.querySelector('[data-panel-target="commands-panel"]');
   if (launcherButton instanceof HTMLButtonElement) {
     launcherButton.focus();
   }
+}
+
+function setupCommandsPopoutButton() {
+  const btn = $("commands-popout-btn");
+  if (!(btn instanceof HTMLButtonElement)) return;
+
+  btn.addEventListener("click", () => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("popout", "commands");
+    url.searchParams.delete("autostart");
+
+    const opened = window.open(url.toString(), "_blank", "noopener,noreferrer");
+    try {
+      opened?.focus();
+    } catch (_err) {
+      // ignore popup focus failures
+    }
+  });
 }
 
 function setupTrajectoryPanel() {
@@ -2952,6 +3880,7 @@ window.addEventListener("DOMContentLoaded", () => {
   setupDraggableConsolePanel();
   setupPanelLauncher();
   setupCommandForm();
+  setupCommandsPopoutButton();
   setupTestingControls();
   initRobotRenderUI({
     panel: $("robot-render-panel"),
@@ -2959,10 +3888,15 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   setupTerminalForm();
   setupTrajectoryPanel();
+  setupListenPanel();
   installPanelCloseButtons();
   const gyroZeroRollPitchBtn = $("gyro-zero-roll-pitch-btn");
   if (gyroZeroRollPitchBtn) {
     gyroZeroRollPitchBtn.addEventListener("click", zeroImuRollPitchDisplay);
+  }
+  const gyroToggleImuDetailsBtn = $("gyro-toggle-imu-details-btn");
+  if (gyroToggleImuDetailsBtn) {
+    gyroToggleImuDetailsBtn.addEventListener("click", toggleGyroImuDetails);
   }
   setupInitialFocus();
 

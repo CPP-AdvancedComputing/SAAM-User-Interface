@@ -11,13 +11,30 @@
         background: #05070b;
       }
 
+      body.commands-popout-mode {
+        margin: 0;
+        overflow: hidden;
+        background: #05070b;
+      }
+
       body.autostart-render-mode .app-header,
       body.autostart-render-mode .panel-launcher,
       body.autostart-render-mode .quick-panel:not(#robot-render-panel) {
         display: none !important;
       }
 
+      body.commands-popout-mode .app-header,
+      body.commands-popout-mode .panel-launcher,
+      body.commands-popout-mode .quick-panel:not(#commands-panel) {
+        display: none !important;
+      }
+
       body.autostart-render-mode .layout {
+        min-height: 100vh;
+        padding: 0 !important;
+      }
+
+      body.commands-popout-mode .layout {
         min-height: 100vh;
         padding: 0 !important;
       }
@@ -36,8 +53,34 @@
         z-index: 9999 !important;
       }
 
+      body.commands-popout-mode #commands-panel {
+        position: fixed !important;
+        inset: 0 !important;
+        display: flex !important;
+        flex-direction: column;
+        width: 100vw !important;
+        height: 100vh !important;
+        min-width: 0 !important;
+        min-height: 0 !important;
+        max-width: none !important;
+        max-height: none !important;
+        margin: 0 !important;
+        border-radius: 0 !important;
+        z-index: 9999 !important;
+        resize: none !important;
+      }
+
       body.autostart-render-mode #robot-render-panel .robot-render-toolbar-right,
       body.autostart-render-mode #robot-render-panel .robot-render-hint {
+        display: none !important;
+      }
+
+      body.commands-popout-mode #commands-panel .panel-drag-handle {
+        cursor: default !important;
+      }
+
+      body.commands-popout-mode #commands-panel .panel-close-btn,
+      body.commands-popout-mode #commands-popout-btn {
         display: none !important;
       }
 
@@ -59,9 +102,6 @@
     <script>
       (() => {
         const params = new URLSearchParams(window.location.search);
-        if (params.get("autostart") !== "render") {
-          return;
-        }
 
         function openRenderAutostartMode() {
           document.body.classList.add("autostart-render-mode");
@@ -93,9 +133,36 @@
           }, 400);
         }
 
-        window.addEventListener("DOMContentLoaded", openRenderAutostartMode, {
-          once: true,
-        });
+        function openCommandsPopoutMode() {
+          document.body.classList.add("commands-popout-mode");
+          document.title = "S.A.A.M. Commands";
+
+          const panel = document.getElementById("commands-panel");
+          const launcher = document.querySelector('[data-panel-target="commands-panel"]');
+
+          window.setTimeout(() => {
+            if (panel instanceof HTMLElement) {
+              panel.hidden = false;
+            }
+            if (launcher instanceof HTMLButtonElement) {
+              launcher.setAttribute("aria-expanded", "true");
+            }
+            window.dispatchEvent(new Event("resize"));
+            window.setTimeout(() => window.dispatchEvent(new Event("resize")), 250);
+          }, 400);
+        }
+
+        if (params.get("autostart") === "render") {
+          window.addEventListener("DOMContentLoaded", openRenderAutostartMode, {
+            once: true,
+          });
+        }
+
+        if (params.get("popout") === "commands") {
+          window.addEventListener("DOMContentLoaded", openCommandsPopoutMode, {
+            once: true,
+          });
+        }
       })();
     </script>
     <link rel="stylesheet" href="styles.css" />
@@ -169,7 +236,19 @@
 
     <main class="layout" aria-label="Sam control interface">
       <section id="commands-panel" class="quick-panel command-panel" aria-label="Command control" hidden>
-        <div class="panel-drag-handle" data-drag-panel="commands-panel"><h2>Commands</h2></div>
+        <div class="panel-drag-handle" data-drag-panel="commands-panel">
+          <h2>Commands</h2>
+          <div class="panel-header-actions">
+            <button
+              type="button"
+              id="commands-popout-btn"
+              class="panel-popout-btn"
+              title="Open Commands in a new tab"
+            >
+              Pop out
+            </button>
+          </div>
+        </div>
         <form id="cmd-builder" class="cmd-builder" autocomplete="off">
           <div class="cmd-row">
             <div class="field-group">
@@ -220,6 +299,28 @@
         </div>
         <div id="devices-content">
           <div class="hint">Auto-discovers all clients on the Jetson's hotspot.</div>
+          <div class="device-tab-row" role="tablist" aria-label="Hotspot device view">
+            <button
+              id="devices-tab-legs"
+              type="button"
+              class="device-tab-btn active"
+              data-device-tab="legs"
+              role="tab"
+              aria-selected="true"
+            >
+              Legs
+            </button>
+            <button
+              id="devices-tab-all"
+              type="button"
+              class="device-tab-btn"
+              data-device-tab="all"
+              role="tab"
+              aria-selected="false"
+            >
+              All
+            </button>
+          </div>
           <table class="device-table" aria-label="Connected device status table">
             <thead>
               <tr>
@@ -231,7 +332,22 @@
             <tbody id="device-status-body">
               <tr>
                 <td>l0</td>
-                <td>10.42.0.181</td>
+                <td>10.42.0.10</td>
+                <td class="device-status-unknown">unknown</td>
+              </tr>
+              <tr>
+                <td>l1</td>
+                <td>10.42.0.11</td>
+                <td class="device-status-unknown">unknown</td>
+              </tr>
+              <tr>
+                <td>l2</td>
+                <td>10.42.0.12</td>
+                <td class="device-status-unknown">unknown</td>
+              </tr>
+              <tr>
+                <td>l3</td>
+                <td>10.42.0.13</td>
                 <td class="device-status-unknown">unknown</td>
               </tr>
             </tbody>
@@ -385,14 +501,28 @@
             type="button"
             id="gyro-zero-roll-pitch-btn"
             class="gyro-zero-roll-pitch-btn"
-            title="Use each leg’s current roll/pitch as 0° for display, prisms, and 3D Render"
+            title="Use each leg’s current roll/pitch as a shared 0° reference for all connected clients"
           >
             Zero roll / pitch (home)
           </button>
+          <button
+            type="button"
+            id="gyro-toggle-imu-details-btn"
+            class="gyro-toggle-imu-details-btn is-active"
+            aria-expanded="true"
+            title="Show or hide per-leg /imu/data details"
+          >
+            <span class="gyro-toggle-imu-details-icon" aria-hidden="true">
+              <span></span>
+              <span></span>
+              <span></span>
+            </span>
+            <span class="sr-only">Toggle IMU data details</span>
+          </button>
         </div>
         <p class="hint gyro-zero-ref-hint">
-          <strong>Zero roll / pitch</strong> only updates the UI reference; it does not command the robot or
-          change IMU firmware calibration.
+          <strong>Zero roll / pitch</strong> now sends a shared host-side zero-reference command so all
+          connected clients agree. It does not command the robot or change IMU firmware calibration.
         </p>
 
         <div class="leg-imu-grid" role="group" aria-label="Per-leg IMU">
@@ -400,29 +530,37 @@
             <h3 class="leg-imu-card-title">L0 IMU</h3>
             <div class="gyro-block-label"><code>/l0/imu/roll_pitch_deg</code></div>
             <div class="imu-readout imu-readout-compact" data-leg-roll-pitch="l0" role="status">—</div>
-            <div class="gyro-block-label"><code>/l0/imu/data</code></div>
-            <pre class="trajectory-pre gyro-leg-imu-pre" data-leg-imu-filtered="l0" tabindex="0">—</pre>
+            <div class="gyro-imu-detail">
+              <div class="gyro-block-label"><code>/l0/imu/data</code></div>
+              <pre class="trajectory-pre gyro-leg-imu-pre" data-leg-imu-filtered="l0" tabindex="0">—</pre>
+            </div>
           </article>
           <article class="leg-imu-card" data-leg-key="l1">
             <h3 class="leg-imu-card-title">L1 IMU</h3>
             <div class="gyro-block-label"><code>/l1/imu/roll_pitch_deg</code></div>
             <div class="imu-readout imu-readout-compact" data-leg-roll-pitch="l1" role="status">—</div>
-            <div class="gyro-block-label"><code>/l1/imu/data</code></div>
-            <pre class="trajectory-pre gyro-leg-imu-pre" data-leg-imu-filtered="l1" tabindex="0">—</pre>
+            <div class="gyro-imu-detail">
+              <div class="gyro-block-label"><code>/l1/imu/data</code></div>
+              <pre class="trajectory-pre gyro-leg-imu-pre" data-leg-imu-filtered="l1" tabindex="0">—</pre>
+            </div>
           </article>
           <article class="leg-imu-card" data-leg-key="l2">
             <h3 class="leg-imu-card-title">L2 IMU</h3>
             <div class="gyro-block-label"><code>/l2/imu/roll_pitch_deg</code></div>
             <div class="imu-readout imu-readout-compact" data-leg-roll-pitch="l2" role="status">—</div>
-            <div class="gyro-block-label"><code>/l2/imu/data</code></div>
-            <pre class="trajectory-pre gyro-leg-imu-pre" data-leg-imu-filtered="l2" tabindex="0">—</pre>
+            <div class="gyro-imu-detail">
+              <div class="gyro-block-label"><code>/l2/imu/data</code></div>
+              <pre class="trajectory-pre gyro-leg-imu-pre" data-leg-imu-filtered="l2" tabindex="0">—</pre>
+            </div>
           </article>
           <article class="leg-imu-card" data-leg-key="l3">
             <h3 class="leg-imu-card-title">L3 IMU</h3>
             <div class="gyro-block-label"><code>/l3/imu/roll_pitch_deg</code></div>
             <div class="imu-readout imu-readout-compact" data-leg-roll-pitch="l3" role="status">—</div>
-            <div class="gyro-block-label"><code>/l3/imu/data</code></div>
-            <pre class="trajectory-pre gyro-leg-imu-pre" data-leg-imu-filtered="l3" tabindex="0">—</pre>
+            <div class="gyro-imu-detail">
+              <div class="gyro-block-label"><code>/l3/imu/data</code></div>
+              <pre class="trajectory-pre gyro-leg-imu-pre" data-leg-imu-filtered="l3" tabindex="0">—</pre>
+            </div>
           </article>
         </div>
 
@@ -499,10 +637,6 @@
         <div class="panel-drag-handle" data-drag-panel="load-panel">
           <h2>Load</h2>
         </div>
-        <p class="hint">
-          <code>/jetson/cpu_temp</code> and <code>/jetson/cpu_load_percent</code>
-          (<code>std_msgs/Float32</code>) when ROS is connected.
-        </p>
         <div class="jetson-metrics" role="group" aria-label="Jetson CPU metrics">
           <div class="jetson-metric-card">
             <div class="jetson-metric-label">CPU temperature</div>
@@ -583,6 +717,99 @@
       </section>
 
       <section
+        id="listen-panel"
+        class="quick-panel listen-panel"
+        aria-label="ROS topic and UDP listener"
+        hidden
+      >
+        <div class="panel-drag-handle" data-drag-panel="listen-panel">
+          <h2>Listen</h2>
+        </div>
+        <p class="hint">
+          Subscribe to a ROS topic through rosbridge, or ask the gateway to bind a UDP port and
+          stream packets into this panel.
+        </p>
+
+        <div class="listen-mode-row" role="tablist" aria-label="Listener mode">
+          <button
+            id="listen-mode-topic-btn"
+            type="button"
+            class="listen-mode-btn active"
+            data-listen-mode="topic"
+            role="tab"
+            aria-selected="true"
+          >
+            ROS topic
+          </button>
+          <button
+            id="listen-mode-udp-btn"
+            type="button"
+            class="listen-mode-btn"
+            data-listen-mode="udp"
+            role="tab"
+            aria-selected="false"
+          >
+            UDP port
+          </button>
+        </div>
+
+        <div id="listen-topic-fields" class="listen-fields">
+          <div class="listen-field-grid">
+            <div class="field-group">
+              <label for="listen-topic-select">Topic</label>
+              <select id="listen-topic-select" aria-label="Select ROS topic preset"></select>
+            </div>
+            <div class="field-group">
+              <label for="listen-topic-type">Message type</label>
+              <input
+                id="listen-topic-type"
+                type="text"
+                value="std_msgs/msg/String"
+                autocomplete="off"
+              />
+            </div>
+          </div>
+          <div id="listen-custom-topic-group" class="field-group" hidden>
+            <label for="listen-topic-custom">Custom topic</label>
+            <input
+              id="listen-topic-custom"
+              type="text"
+              value="/web/log"
+              placeholder="/my/topic"
+              autocomplete="off"
+            />
+          </div>
+        </div>
+
+        <div id="listen-udp-fields" class="listen-fields" hidden>
+          <div class="listen-field-grid">
+            <div class="field-group">
+              <label for="listen-port">UDP port</label>
+              <input id="listen-port" type="text" value="5015" inputmode="numeric" autocomplete="off" />
+            </div>
+            <div class="field-group">
+              <label for="listen-bind-ip">Bind IP</label>
+              <input id="listen-bind-ip" type="text" value="0.0.0.0" autocomplete="off" />
+            </div>
+          </div>
+        </div>
+
+        <div class="listen-actions">
+          <button id="listen-start-btn" type="button">Start listening</button>
+          <button id="listen-stop-btn" type="button">Stop</button>
+          <button id="listen-clear-btn" type="button">Clear</button>
+          <span id="listen-status" class="listen-status" role="status" aria-live="polite">Idle</span>
+        </div>
+
+        <pre
+          id="listen-output"
+          class="trajectory-pre listen-output"
+          tabindex="0"
+          aria-label="Listener output"
+        >—</pre>
+      </section>
+
+      <section
         id="robot-render-panel"
         class="quick-panel robot-render-panel"
         aria-label="Leg 3D render"
@@ -630,6 +857,7 @@
         <button type="button" data-panel-target="gyro-panel">Gyro</button>
         <button type="button" data-panel-target="load-panel">Load</button>
         <button type="button" data-panel-target="planner-status-panel">Status</button>
+        <button type="button" data-panel-target="listen-panel">Listen</button>
         <button type="button" data-panel-target="log-panel">Log</button>
         <div class="panel-launcher-layout" role="group" aria-label="Saved layout">
           <span class="panel-launcher-layout-label">Layout</span>
