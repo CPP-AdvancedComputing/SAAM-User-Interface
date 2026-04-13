@@ -18,7 +18,6 @@ const CONFIG = {
     legCommandMessageType: "sam_interfaces/msg/LegCommand",
     imuMessageType: "sensor_msgs/Imu",
     imuRollPitchMessageType: "std_msgs/String",
-    emptyMessageType: "std_msgs/msg/Empty",
     legEnabledStateMessageType: "std_msgs/msg/Bool",
     jetsonCpuTempTopic: "/jetson/cpu_temp",
     jetsonCpuLoadTopic: "/jetson/cpu_load_percent",
@@ -38,10 +37,10 @@ const TERMINAL_GATEWAY_URL_STORAGE_KEY = "sam-ui-terminal-gateway-url-v1";
 
 /** Per-leg IMU topic paths (filtered IMU, String summary, debug raw). */
 const legImuTopics = {
-  l0: { imu: "/l0/imu/data", rollPitch: "/l0/imu/roll_pitch_deg", raw: "/l0/imu/data_raw", zero: "/l0/imu/zero_reference" },
-  l1: { imu: "/l1/imu/data", rollPitch: "/l1/imu/roll_pitch_deg", raw: "/l1/imu/data_raw", zero: "/l1/imu/zero_reference" },
-  l2: { imu: "/l2/imu/data", rollPitch: "/l2/imu/roll_pitch_deg", raw: "/l2/imu/data_raw", zero: "/l2/imu/zero_reference" },
-  l3: { imu: "/l3/imu/data", rollPitch: "/l3/imu/roll_pitch_deg", raw: "/l3/imu/data_raw", zero: "/l3/imu/zero_reference" },
+  l0: { imu: "/l0/imu/data", rollPitch: "/l0/imu/roll_pitch_deg", raw: "/l0/imu/data_raw" },
+  l1: { imu: "/l1/imu/data", rollPitch: "/l1/imu/roll_pitch_deg", raw: "/l1/imu/data_raw" },
+  l2: { imu: "/l2/imu/data", rollPitch: "/l2/imu/roll_pitch_deg", raw: "/l2/imu/data_raw" },
+  l3: { imu: "/l3/imu/data", rollPitch: "/l3/imu/roll_pitch_deg", raw: "/l3/imu/data_raw" },
 };
 
 const LISTEN_TOPIC_PRESETS = [
@@ -86,7 +85,6 @@ const legImuRegistry = Object.fromEntries(
 );
 
 let legImuRosTopics = [];
-let legImuZeroTopics = {};
 let legImuUiRaf = null;
 
 let ros = null;
@@ -160,12 +158,9 @@ function loadStoredHotspotLegIps() {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return {};
     const normalized = {};
-    const seenIps = new Set();
     for (const leg of WEB_LOG_LEGS) {
       const ip = normalizeHotspotIp(parsed[leg]);
-      if (!isHotspotClientIp(ip) || seenIps.has(ip)) continue;
-      normalized[leg] = ip;
-      seenIps.add(ip);
+      if (isHotspotClientIp(ip)) normalized[leg] = ip;
     }
     return normalized;
   } catch (_err) {
@@ -238,20 +233,8 @@ function learnHotspotLegIp(leg, ip) {
   const normalizedIp = normalizeHotspotIp(ip);
   if (!legKey || !isHotspotClientIp(normalizedIp)) return false;
   const sawConnected = noteConnectedHotspotDevice(normalizedIp, legKey);
-  const nextHints = { ...learnedHotspotLegIps };
-  let changed = false;
-  for (const otherLeg of WEB_LOG_LEGS) {
-    if (otherLeg === legKey) continue;
-    if (nextHints[otherLeg] !== normalizedIp) continue;
-    delete nextHints[otherLeg];
-    changed = true;
-  }
-  if (nextHints[legKey] !== normalizedIp) {
-    nextHints[legKey] = normalizedIp;
-    changed = true;
-  }
-  if (!changed) return sawConnected;
-  learnedHotspotLegIps = nextHints;
+  if (learnedHotspotLegIps[legKey] === normalizedIp) return sawConnected;
+  learnedHotspotLegIps = { ...learnedHotspotLegIps, [legKey]: normalizedIp };
   persistHotspotLegIps();
   return true;
 }
@@ -285,12 +268,13 @@ function buildHotspotStatusByIp(devices) {
 
 function normalizeTrackedHotspotDevices(devices) {
   const statusByIp = buildHotspotStatusByIp(devices);
-  return buildDefaultTrackedHotspotDevices().map((device) => {
+  const tracked = buildDefaultTrackedHotspotDevices().map((device) => {
     return {
       ...device,
       status: String(statusByIp.get(device.ip) || device.status || "unknown"),
     };
   });
+  return applyHotspotDisplayNames(tracked);
 }
 
 function normalizeAllHotspotDevices(devices) {
@@ -471,7 +455,6 @@ function teardownImuTopics() {
     }
   }
   legImuRosTopics = [];
-  legImuZeroTopics = {};
   if (legImuUiRaf != null) {
     cancelAnimationFrame(legImuUiRaf);
     legImuUiRaf = null;
@@ -608,7 +591,17 @@ function stopActiveListener(options = {}) {
 }
 
 function setListenMode(nextMode) {
-  listenMode = nextMode === "udp" ? "udp" : "topic";
+  const normalizedMode = nextMode === "udp" ? "udp" : "topic";
+  const modeChanged = normalizedMode !== listenMode;
+  const hadRosTopic = Boolean(listenRosTopic);
+  const hadUdp = listenUdpPort != null;
+
+  if (modeChanged && (hadRosTopic || hadUdp)) {
+    stopActiveListener();
+    appendListenOutput("Stopped active listener after switching listen mode.");
+  }
+
+  listenMode = normalizedMode;
   const topicFields = $("listen-topic-fields");
   const udpFields = $("listen-udp-fields");
   if (topicFields) topicFields.hidden = listenMode !== "topic";
@@ -1497,6 +1490,43 @@ function parseRollPitchDegString(raw) {
   return { summary: s, roll_deg: null, pitch_deg: null };
 }
 
+function renderRollPitchReadout(target, readout) {
+  if (!(target instanceof HTMLElement)) return;
+  target.replaceChildren();
+
+  if (
+    readout &&
+    typeof readout === "object" &&
+    Number.isFinite(readout.roll_deg) &&
+    Number.isFinite(readout.pitch_deg)
+  ) {
+    const rows = [
+      ["Roll:", `${Number(readout.roll_deg).toFixed(2)}\u00b0`],
+      ["Pitch:", `${Number(readout.pitch_deg).toFixed(2)}\u00b0`],
+    ];
+
+    rows.forEach(([labelText, valueText]) => {
+      const row = document.createElement("div");
+      row.className = "imu-readout-row";
+
+      const label = document.createElement("span");
+      label.className = "imu-readout-label";
+      label.textContent = labelText;
+
+      const value = document.createElement("span");
+      value.className = "imu-readout-value";
+      value.textContent = valueText;
+
+      row.append(label, value);
+      target.appendChild(row);
+    });
+    return;
+  }
+
+  target.textContent =
+    typeof readout === "string" && readout.trim() ? readout : "\u2014";
+}
+
 function applyRollPitchDisplayForLeg(legId) {
   const r = legImuRegistry[legId];
   if (!r) return;
@@ -1505,48 +1535,22 @@ function applyRollPitchDisplayForLeg(legId) {
   if (!Number.isFinite(sr) || !Number.isFinite(sp)) return;
   r.rollDeg = sr - r.rollPitchZeroRoll;
   r.pitchDeg = sp - r.rollPitchZeroPitch;
-  r.latestRollPitchReadout = `roll ${r.rollDeg.toFixed(2)}\u00b0 \u00b7 pitch ${r.pitchDeg.toFixed(2)}\u00b0`;
+  r.latestRollPitchReadout = {
+    roll_deg: r.rollDeg,
+    pitch_deg: r.pitchDeg,
+  };
 }
 
-/** Ask each per-leg ROS IMU node to make its current roll/pitch the shared 0° reference. */
+/** Set current sensor roll/pitch as the new 0° reference (display, stance viz, 3D Render). */
 function zeroImuRollPitchDisplay() {
-  let publishCount = 0;
   for (const id of CONFIG.legs) {
     const r = legImuRegistry[id];
-    r.rollPitchZeroRoll = 0;
-    r.rollPitchZeroPitch = 0;
+    r.rollPitchZeroRoll = Number.isFinite(r.rollDegSensor) ? r.rollDegSensor : 0;
+    r.rollPitchZeroPitch = Number.isFinite(r.pitchDegSensor) ? r.pitchDegSensor : 0;
     applyRollPitchDisplayForLeg(id);
-
-    const zeroTopic = legImuZeroTopics[id];
-    if (zeroTopic) {
-      zeroTopic.publish({});
-      publishCount += 1;
-    }
   }
   scheduleLegImuUiUpdate();
-  if (publishCount > 0) {
-    logLine("GYRO", "Shared roll/pitch zero command sent to ROS IMU nodes", "info");
-  } else {
-    logLine("GYRO", "Could not send shared zero command because ROS IMU topics are not connected", "error");
-  }
-}
-
-function toggleGyroImuDetails() {
-  const btn = $("gyro-toggle-imu-details-btn");
-  const detailBlocks = document.querySelectorAll(".gyro-imu-detail");
-  if (!btn || detailBlocks.length === 0) return;
-
-  const isExpanded = btn.getAttribute("aria-expanded") !== "false";
-  const nextExpanded = !isExpanded;
-  btn.setAttribute("aria-expanded", String(nextExpanded));
-  btn.classList.toggle("is-active", nextExpanded);
-  btn.title = nextExpanded
-    ? "Hide per-leg /imu/data details"
-    : "Show per-leg /imu/data details";
-
-  detailBlocks.forEach((block) => {
-    block.hidden = !nextExpanded;
-  });
+  logLine("GYRO", "Roll/pitch display zeroed (current attitude is now 0° reference per leg)", "info");
 }
 
 function scheduleLegImuUiUpdate() {
@@ -1561,7 +1565,7 @@ function flushLegImuUi() {
     const filteredEl = document.querySelector(`[data-leg-imu-filtered="${id}"]`);
     if (filteredEl) filteredEl.textContent = r.latestImDisplay ?? "\u2014";
     const rpEl = document.querySelector(`[data-leg-roll-pitch="${id}"]`);
-    if (rpEl) rpEl.textContent = r.latestRollPitchReadout ?? "\u2014";
+    if (rpEl) renderRollPitchReadout(rpEl, r.latestRollPitchReadout);
     const rawEl = document.querySelector(`[data-leg-imu-raw="${id}"]`);
     if (rawEl) rawEl.textContent = r.latestRawDisplay ?? "\u2014";
 
@@ -1583,7 +1587,6 @@ function initGyroTopics() {
 
   const imuType = CONFIG.ros.imuMessageType;
   const rpType = CONFIG.ros.imuRollPitchMessageType;
-  const emptyType = CONFIG.ros.emptyMessageType;
 
   for (const legId of CONFIG.legs) {
     const paths = legImuTopics[legId];
@@ -1630,12 +1633,6 @@ function initGyroTopics() {
       scheduleLegImuUiUpdate();
     });
     legImuRosTopics.push(tRaw);
-
-    legImuZeroTopics[legId] = new ROSLIB.Topic({
-      ros,
-      name: paths.zero,
-      messageType: emptyType,
-    });
   }
 
   scheduleLegImuUiUpdate();
@@ -1651,27 +1648,36 @@ const CMD_FIELDS = {
   home:   [],
   rate:   ["value"],
   raw:    ["command"],
-  walk:   ["count"],
+  walk:   [],
 };
 
 const CMD_DEFAULTS = {
   inner: 0, outer: 0, servo: 0, value: 0, command: "", count: "5",
 };
 
-const WALK_SEQUENCE_AXIS_LABELS = Object.freeze(["I", "O", "H", "Y", "P", "R"]);
+const WALK_SEQUENCE_VALUE_LABELS = Object.freeze(["I", "O", "H", "Δ"]);
+const WALK_SEQUENCE_COLUMN_CONFIG = Object.freeze([
+  { label: "I", valueIndex: 0 },
+  { label: "O", valueIndex: 1 },
+  { label: "H", valueIndex: 2 },
+  { label: "Δ", valueIndex: 3 },
+]);
+const WALK_SEQUENCE_DELTA_INDEX = 3;
+const LEGACY_WALK_SEQUENCE_VALUE_COUNT = 6;
+const DEFAULT_WALK_GLOBAL_DELTA = 3;
 
 const DEFAULT_WALK_SEQUENCE = [
   [
-    [0, 0, 0, 0, 0, 0],
-    [0, 0, 30, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0],
+    [0, 0, 0, DEFAULT_WALK_GLOBAL_DELTA],
+    [0, 0, 30, DEFAULT_WALK_GLOBAL_DELTA],
+    [0, 0, 0, DEFAULT_WALK_GLOBAL_DELTA],
+    [0, 0, 0, DEFAULT_WALK_GLOBAL_DELTA],
   ],
   [
-    [0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0],
+    [0, 0, 0, DEFAULT_WALK_GLOBAL_DELTA],
+    [0, 0, 0, DEFAULT_WALK_GLOBAL_DELTA],
+    [0, 0, 0, DEFAULT_WALK_GLOBAL_DELTA],
+    [0, 0, 0, DEFAULT_WALK_GLOBAL_DELTA],
   ],
 ];
 
@@ -1686,7 +1692,11 @@ function cloneWalkSequence(sequence) {
 }
 
 function createEmptyWalkPose() {
-  return CONFIG.legs.map(() => WALK_SEQUENCE_AXIS_LABELS.map(() => 0));
+  return CONFIG.legs.map(() =>
+    WALK_SEQUENCE_VALUE_LABELS.map((_, index) =>
+      index === WALK_SEQUENCE_DELTA_INDEX ? DEFAULT_WALK_GLOBAL_DELTA : 0
+    )
+  );
 }
 
 function resizeWalkSequence(sequence, stepCount) {
@@ -1732,13 +1742,16 @@ function normalizeWalkSequence(rawValue) {
     }
 
     return pose.map((legValues, legIndex) => {
-      if (!Array.isArray(legValues) || legValues.length !== WALK_SEQUENCE_AXIS_LABELS.length) {
+      if (
+        !Array.isArray(legValues) ||
+        ![WALK_SEQUENCE_VALUE_LABELS.length, LEGACY_WALK_SEQUENCE_VALUE_COUNT].includes(legValues.length)
+      ) {
         throw new Error(
-          `Walk pose ${poseIndex + 1} ${CONFIG.legs[legIndex].toUpperCase()} must include ${WALK_SEQUENCE_AXIS_LABELS.length} values.`
+          `Walk pose ${poseIndex + 1} ${CONFIG.legs[legIndex].toUpperCase()} must include ${WALK_SEQUENCE_VALUE_LABELS.length} values.`
         );
       }
 
-      return legValues.map((axisValue, axisIndex) => {
+      const normalizedValues = legValues.map((axisValue, axisIndex) => {
         const numeric =
           typeof axisValue === "number"
             ? axisValue
@@ -1750,8 +1763,71 @@ function normalizeWalkSequence(rawValue) {
         }
         return numeric;
       });
+
+      if (normalizedValues.length === WALK_SEQUENCE_VALUE_LABELS.length) {
+        return normalizedValues;
+      }
+
+      return [
+        normalizedValues[0],
+        normalizedValues[1],
+        normalizedValues[2],
+        normalizedValues[LEGACY_WALK_SEQUENCE_VALUE_COUNT - 1],
+      ];
     });
   });
+}
+
+function getWalkSequenceCommonDelta(sequence) {
+  let sharedDelta = null;
+  for (const pose of sequence) {
+    for (const legValues of pose) {
+      const deltaValue = Number.parseFloat(legValues[WALK_SEQUENCE_DELTA_INDEX] ?? 0);
+      if (!Number.isFinite(deltaValue) || deltaValue <= 0) {
+        return null;
+      }
+      if (sharedDelta == null) {
+        sharedDelta = deltaValue;
+      } else if (Math.abs(sharedDelta - deltaValue) > 1e-9) {
+        return null;
+      }
+    }
+  }
+  return sharedDelta;
+}
+
+function syncGlobalWalkDeltaInput(sequence) {
+  const globalDeltaInput = $("cmd-f-global-delta");
+  if (!(globalDeltaInput instanceof HTMLInputElement)) return;
+  if (document.activeElement === globalDeltaInput) return;
+  const sharedDelta = getWalkSequenceCommonDelta(sequence);
+  globalDeltaInput.value = sharedDelta == null ? "" : String(sharedDelta);
+}
+
+function applyGlobalWalkDelta(deltaValue) {
+  const numericDelta = Number.parseFloat(String(deltaValue ?? "").trim());
+  if (!Number.isFinite(numericDelta) || numericDelta <= 0) return;
+
+  const textarea = $("cmd-f-walk-sequence");
+  if (!(textarea instanceof HTMLTextAreaElement)) return;
+
+  try {
+    const normalized = parseWalkSequenceInput(textarea.value);
+    const updated = normalized.map((pose) =>
+      pose.map((legValues) =>
+        legValues.map((value, index) =>
+          index === WALK_SEQUENCE_DELTA_INDEX ? numericDelta : value
+        )
+      )
+    );
+    syncWalkSequenceText(updated);
+    const globalDeltaInput = $("cmd-f-global-delta");
+    if (globalDeltaInput instanceof HTMLInputElement) {
+      globalDeltaInput.value = String(numericDelta);
+    }
+  } catch (_err) {
+    // Keep the current sequence untouched if the editor contents are invalid.
+  }
 }
 
 function parseWalkSequenceInput(rawText) {
@@ -1790,6 +1866,7 @@ function updateWalkSequenceStatus() {
       const stepLabel = normalized.length === 1 ? "step" : "steps";
       summary.textContent = `Sequence table · ${normalized.length} ${stepLabel}`;
     }
+    syncGlobalWalkDeltaInput(normalized);
     if (stepCountInput instanceof HTMLInputElement && document.activeElement !== stepCountInput) {
       stepCountInput.value = String(normalized.length);
     }
@@ -1868,10 +1945,10 @@ function renderWalkSequenceTableEditor(sequenceOverride = null) {
     stepHeader.textContent = "Step";
     headerRow.appendChild(stepHeader);
 
-    WALK_SEQUENCE_AXIS_LABELS.forEach((axisLabel) => {
+    WALK_SEQUENCE_COLUMN_CONFIG.forEach(({ label }) => {
       const th = document.createElement("th");
       th.scope = "col";
-      th.textContent = axisLabel;
+      th.textContent = label;
       headerRow.appendChild(th);
     });
     thead.appendChild(headerRow);
@@ -1885,22 +1962,23 @@ function renderWalkSequenceTableEditor(sequenceOverride = null) {
       rowLabel.textContent = `Step ${stepIndex + 1}`;
       row.appendChild(rowLabel);
 
-      WALK_SEQUENCE_AXIS_LABELS.forEach((axisLabel, axisIndex) => {
+      WALK_SEQUENCE_COLUMN_CONFIG.forEach(({ label, valueIndex }) => {
         const cell = document.createElement("td");
+        const isDeltaField = valueIndex === WALK_SEQUENCE_DELTA_INDEX;
         const input = document.createElement("input");
         input.type = "number";
         input.step = "any";
-        input.className = "cmd-walk-cell-input";
-        input.value = String(pose[legIndex][axisIndex] ?? 0);
+        input.className = `cmd-walk-cell-input${isDeltaField ? " cmd-walk-delta-input" : ""}`;
+        input.value = String(pose[legIndex][valueIndex] ?? 0);
         input.setAttribute(
           "aria-label",
-          `${legId.toUpperCase()} step ${stepIndex + 1} axis ${axisLabel}`
+          `${legId.toUpperCase()} step ${stepIndex + 1} axis ${isDeltaField ? "delta" : label}`
         );
         input.addEventListener("focus", () => input.select());
         input.addEventListener("input", () => {
           const raw = String(input.value ?? "").trim();
           const numeric = raw === "" ? 0 : Number.parseFloat(raw);
-          normalized[stepIndex][legIndex][axisIndex] = Number.isFinite(numeric) ? numeric : 0;
+          normalized[stepIndex][legIndex][valueIndex] = Number.isFinite(numeric) ? numeric : 0;
           syncWalkSequenceText(normalized, { render: false });
         });
         input.addEventListener("keydown", (event) => {
@@ -1909,14 +1987,14 @@ function renderWalkSequenceTableEditor(sequenceOverride = null) {
           }
           event.preventDefault();
           const rowOffset = event.shiftKey ? -1 : 1;
-          const targetInput = legInputs[stepIndex + rowOffset]?.[axisIndex];
+          const targetInput = legInputs[stepIndex + rowOffset]?.[valueIndex];
           if (targetInput instanceof HTMLInputElement) {
             targetInput.focus();
             targetInput.select();
           }
         });
         legInputs[stepIndex] ??= [];
-        legInputs[stepIndex][axisIndex] = input;
+        legInputs[stepIndex][valueIndex] = input;
         cell.appendChild(input);
         row.appendChild(cell);
       });
@@ -1960,7 +2038,7 @@ function appendWalkSequenceEditor(container) {
   const stepGroup = document.createElement("label");
   stepGroup.className = "cmd-walk-step-count";
   stepGroup.setAttribute("for", "cmd-walk-step-count");
-  stepGroup.textContent = "Steps";
+  stepGroup.textContent = "Cycle Poses";
 
   const stepInput = document.createElement("input");
   stepInput.id = "cmd-walk-step-count";
@@ -2030,6 +2108,58 @@ function buildCmdFields() {
   if (legGroup) legGroup.hidden = type === "walk";
   const container = $("cmd-fields");
   container.innerHTML = "";
+
+  if (type === "walk") {
+    const walkOptionsRow = document.createElement("div");
+    walkOptionsRow.className = "cmd-row cmd-walk-options-row";
+
+    const countGroup = document.createElement("div");
+    countGroup.className = "field-group";
+
+    const countLabel = document.createElement("label");
+    countLabel.setAttribute("for", "cmd-f-count");
+    countLabel.textContent = "Steps";
+
+    const countInput = document.createElement("input");
+    countInput.type = "number";
+    countInput.id = "cmd-f-count";
+    countInput.min = "1";
+    countInput.step = "1";
+    countInput.value = CMD_DEFAULTS.count ?? "5";
+    countInput.addEventListener("focus", () => countInput.select());
+
+    countGroup.appendChild(countLabel);
+    countGroup.appendChild(countInput);
+    walkOptionsRow.appendChild(countGroup);
+
+    const deltaGroup = document.createElement("div");
+    deltaGroup.className = "field-group";
+
+    const deltaLabel = document.createElement("label");
+    deltaLabel.setAttribute("for", "cmd-f-global-delta");
+    deltaLabel.textContent = "Global Delta";
+
+    const deltaInput = document.createElement("input");
+    deltaInput.type = "number";
+    deltaInput.id = "cmd-f-global-delta";
+    deltaInput.min = "0.001";
+    deltaInput.step = "any";
+    deltaInput.placeholder = `reset all to ${DEFAULT_WALK_GLOBAL_DELTA}`;
+    deltaInput.setAttribute("aria-label", "Reset all walk deltas");
+    deltaInput.addEventListener("focus", () => deltaInput.select());
+    deltaInput.addEventListener("change", () => applyGlobalWalkDelta(deltaInput.value));
+    deltaInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      applyGlobalWalkDelta(deltaInput.value);
+    });
+
+    deltaGroup.appendChild(deltaLabel);
+    deltaGroup.appendChild(deltaInput);
+    walkOptionsRow.appendChild(deltaGroup);
+
+    container.appendChild(walkOptionsRow);
+  }
 
   (CMD_FIELDS[type] || []).forEach((field) => {
     const group = document.createElement("div");
@@ -2577,6 +2707,7 @@ function setupTestingControls() {
 let panelZCounter = 26;
 
 const UI_LAYOUT_STORAGE_KEY = "sam-ui-layout-v1";
+const UI_LAYOUT_PRESETS_STORAGE_KEY = "sam-ui-layout-presets-v1";
 let layoutSaveTimer = 0;
 
 function scheduleSaveUILayout() {
@@ -2737,6 +2868,272 @@ function restoreUILayoutFromStorage() {
   }
 }
 
+function loadStoredUILayoutPresets() {
+  try {
+    const raw = localStorage.getItem(UI_LAYOUT_PRESETS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((entry) => {
+        return (
+          entry &&
+          typeof entry === "object" &&
+          typeof entry.name === "string" &&
+          isValidUILayoutState(entry.state)
+        );
+      })
+      .map((entry) => ({
+        name: String(entry.name).trim(),
+        savedAt:
+          typeof entry.savedAt === "string" && entry.savedAt
+            ? entry.savedAt
+            : new Date().toISOString(),
+        state: entry.state,
+      }))
+      .filter((entry) => entry.name);
+  } catch (_err) {
+    return [];
+  }
+}
+
+function persistUILayoutPresets(presets) {
+  localStorage.setItem(UI_LAYOUT_PRESETS_STORAGE_KEY, JSON.stringify(presets));
+}
+
+function positionUILayoutPresetMenu() {
+  const btn = $("ui-layout-preset-btn");
+  const menu = $("ui-layout-preset-menu");
+  if (!(btn instanceof HTMLButtonElement) || !(menu instanceof HTMLElement) || menu.hidden) return;
+
+  const buttonRect = btn.getBoundingClientRect();
+  const menuRect = menu.getBoundingClientRect();
+  const gap = 12;
+  const left = Math.max(8, Math.round(buttonRect.left - menuRect.width - gap));
+  const top = Math.min(
+    Math.max(8, Math.round(buttonRect.top + buttonRect.height / 2 - menuRect.height / 2)),
+    Math.max(8, window.innerHeight - menuRect.height - 8)
+  );
+
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+function bringUILayoutPresetMenuToFront() {
+  const menu = $("ui-layout-preset-menu");
+  if (!(menu instanceof HTMLElement)) return;
+  recomputePanelZCounterFromDom();
+  menu.style.zIndex = String(Math.max(panelZCounter + 1, 60));
+}
+
+function refreshUILayoutPresetPicker() {
+  const select = $("ui-layout-preset-select");
+  const loadBtn = $("ui-layout-preset-load-btn");
+  const deleteBtn = $("ui-layout-preset-delete-btn");
+  if (!(select instanceof HTMLSelectElement)) return [];
+
+  const presets = loadStoredUILayoutPresets().sort((a, b) => {
+    return new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime();
+  });
+
+  const previousValue = select.value;
+  select.innerHTML = "";
+
+  if (presets.length === 0) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No saved presets";
+    select.appendChild(option);
+    select.disabled = true;
+    if (loadBtn instanceof HTMLButtonElement) loadBtn.disabled = true;
+    if (deleteBtn instanceof HTMLButtonElement) deleteBtn.disabled = true;
+    return presets;
+  }
+
+  presets.forEach((preset) => {
+    const option = document.createElement("option");
+    option.value = preset.name;
+    option.textContent = preset.name;
+    select.appendChild(option);
+  });
+
+  select.disabled = false;
+  const hasPrevious = presets.some((preset) => preset.name === previousValue);
+  select.value = hasPrevious ? previousValue : presets[0].name;
+  if (loadBtn instanceof HTMLButtonElement) loadBtn.disabled = false;
+  if (deleteBtn instanceof HTMLButtonElement) deleteBtn.disabled = false;
+  positionUILayoutPresetMenu();
+  return presets;
+}
+
+function toggleUILayoutPresetMenu(forceOpen = null) {
+  const btn = $("ui-layout-preset-btn");
+  const menu = $("ui-layout-preset-menu");
+  if (!(btn instanceof HTMLButtonElement) || !(menu instanceof HTMLElement)) return false;
+
+  const shouldOpen = forceOpen == null ? menu.hidden : !!forceOpen;
+  if (shouldOpen) {
+    menu.style.visibility = "hidden";
+    menu.hidden = false;
+    bringUILayoutPresetMenuToFront();
+    refreshUILayoutPresetPicker();
+    positionUILayoutPresetMenu();
+    menu.style.visibility = "";
+  } else {
+    menu.hidden = true;
+    menu.style.visibility = "";
+    menu.style.zIndex = "";
+  }
+  btn.setAttribute("aria-expanded", String(shouldOpen));
+  return shouldOpen;
+}
+
+function saveCurrentUILayoutPreset() {
+  const suggestedName = `Layout ${new Date().toLocaleString()}`;
+  const rawName = window.prompt("Save current layout as preset:", suggestedName);
+  if (rawName == null) return;
+
+  const name = rawName.trim();
+  if (!name) {
+    logLine("ERROR", "Layout preset name cannot be empty");
+    return;
+  }
+
+  const presets = loadStoredUILayoutPresets();
+  const existingIndex = presets.findIndex((preset) => preset.name === name);
+  if (
+    existingIndex >= 0 &&
+    !window.confirm(`Overwrite the saved layout preset "${name}"?`)
+  ) {
+    return;
+  }
+
+  const entry = {
+    name,
+    savedAt: new Date().toISOString(),
+    state: buildUILayoutState(),
+  };
+
+  if (existingIndex >= 0) presets.splice(existingIndex, 1, entry);
+  else presets.push(entry);
+
+  try {
+    persistUILayoutPresets(presets);
+    refreshUILayoutPresetPicker();
+    const select = $("ui-layout-preset-select");
+    if (select instanceof HTMLSelectElement) select.value = name;
+    positionUILayoutPresetMenu();
+    logLine("INFO", `UI layout preset saved locally as "${name}"`);
+  } catch (_err) {
+    logLine("ERROR", "Could not save layout preset to browser storage");
+  }
+}
+
+function loadSelectedUILayoutPreset() {
+  const select = $("ui-layout-preset-select");
+  if (!(select instanceof HTMLSelectElement)) return;
+  const name = select.value;
+  if (!name) {
+    logLine("ERROR", "Choose a layout preset first");
+    return;
+  }
+
+  const preset = loadStoredUILayoutPresets().find((entry) => entry.name === name);
+  if (!preset || !isValidUILayoutState(preset.state)) {
+    logLine("ERROR", `Saved preset "${name}" is invalid`);
+    refreshUILayoutPresetPicker();
+    return;
+  }
+
+  if (!applyUILayoutState(preset.state)) {
+    logLine("ERROR", `Could not apply preset "${name}"`);
+    return;
+  }
+
+  try {
+    localStorage.setItem(UI_LAYOUT_STORAGE_KEY, JSON.stringify(buildUILayoutState()));
+  } catch (_err) {
+    // keep the applied state even if persistence fails
+  }
+  toggleUILayoutPresetMenu(false);
+  logLine("INFO", `Loaded UI layout preset "${name}"`);
+}
+
+function deleteSelectedUILayoutPreset() {
+  const select = $("ui-layout-preset-select");
+  if (!(select instanceof HTMLSelectElement)) return;
+  const name = select.value;
+  if (!name) {
+    logLine("ERROR", "Choose a layout preset first");
+    return;
+  }
+
+  if (!window.confirm(`Delete the saved layout preset "${name}"?`)) {
+    return;
+  }
+
+  const presets = loadStoredUILayoutPresets();
+  const nextPresets = presets.filter((entry) => entry.name !== name);
+  if (nextPresets.length === presets.length) {
+    logLine("ERROR", `Could not find preset "${name}"`);
+    refreshUILayoutPresetPicker();
+    return;
+  }
+
+  try {
+    persistUILayoutPresets(nextPresets);
+    refreshUILayoutPresetPicker();
+    positionUILayoutPresetMenu();
+    logLine("INFO", `Deleted UI layout preset "${name}"`);
+  } catch (_err) {
+    logLine("ERROR", "Could not delete layout preset from browser storage");
+  }
+}
+
+function syncUILayoutActionButtonWidths() {
+  const buttons = [
+    $("ui-layout-save-btn"),
+    $("ui-layout-preset-btn"),
+    $("ui-layout-export-btn"),
+    $("ui-layout-import-btn"),
+    $("ui-layout-reset-btn"),
+  ].filter((button) => button instanceof HTMLButtonElement);
+
+  if (buttons.length === 0) return;
+
+  buttons.forEach((button) => {
+    button.style.width = "auto";
+  });
+
+  const maxWidth = Math.max(...buttons.map((button) => Math.ceil(button.getBoundingClientRect().width)));
+  const finalWidth = `${maxWidth + 4}px`;
+  buttons.forEach((button) => {
+    button.style.width = finalWidth;
+  });
+}
+
+function setupGyroPanel() {
+  const toggleBtn = $("gyro-toggle-imu-details-btn");
+  const detailEls = Array.from(document.querySelectorAll(".gyro-imu-detail"));
+  if (!(toggleBtn instanceof HTMLButtonElement) || detailEls.length === 0) return;
+
+  const syncImuDetailVisibility = (showDetails) => {
+    detailEls.forEach((el) => {
+      el.hidden = !showDetails;
+    });
+    toggleBtn.classList.toggle("is-active", showDetails);
+    toggleBtn.setAttribute("aria-expanded", String(showDetails));
+  };
+
+  const initiallyExpanded = toggleBtn.getAttribute("aria-expanded") !== "false";
+  syncImuDetailVisibility(initiallyExpanded);
+
+  toggleBtn.addEventListener("click", () => {
+    const opening = toggleBtn.getAttribute("aria-expanded") !== "true";
+    syncImuDetailVisibility(opening);
+  });
+}
+
 function resetUILayoutToBlankSlate() {
   document.querySelectorAll(".quick-panel").forEach((el) => {
     if (!(el instanceof HTMLElement)) return;
@@ -2794,6 +3191,47 @@ function setupUILayoutPersistence() {
     logLine("INFO", "UI layout exported to file");
   });
 
+  const saveBtn = $("ui-layout-save-btn");
+  saveBtn?.addEventListener("click", saveCurrentUILayoutPreset);
+
+  const presetBtn = $("ui-layout-preset-btn");
+  presetBtn?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleUILayoutPresetMenu();
+  });
+
+  const presetLoadBtn = $("ui-layout-preset-load-btn");
+  presetLoadBtn?.addEventListener("click", loadSelectedUILayoutPreset);
+
+  const presetDeleteBtn = $("ui-layout-preset-delete-btn");
+  presetDeleteBtn?.addEventListener("click", deleteSelectedUILayoutPreset);
+
+  const presetSelect = $("ui-layout-preset-select");
+  presetSelect?.addEventListener("dblclick", loadSelectedUILayoutPreset);
+
+  document.addEventListener("click", (event) => {
+    const menu = $("ui-layout-preset-menu");
+    const btn = $("ui-layout-preset-btn");
+    if (!(menu instanceof HTMLElement) || menu.hidden) return;
+    const target = event.target;
+    if (
+      target instanceof Node &&
+      (menu.contains(target) || (btn instanceof HTMLElement && btn.contains(target)))
+    ) {
+      return;
+    }
+    toggleUILayoutPresetMenu(false);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      toggleUILayoutPresetMenu(false);
+    }
+  });
+
+  refreshUILayoutPresetPicker();
+  syncUILayoutActionButtonWidths();
+
   const importInput = $("ui-layout-import-input");
   const importBtn = $("ui-layout-import-btn");
   importBtn?.addEventListener("click", () => importInput?.click());
@@ -2836,6 +3274,8 @@ function setupUILayoutPersistence() {
   });
 
   window.addEventListener("resize", () => {
+    positionUILayoutPresetMenu();
+    syncUILayoutActionButtonWidths();
     if (window.innerWidth > 1100) scheduleSaveUILayout();
   });
 }
@@ -3803,11 +4243,11 @@ function setupTerminalForm() {
       }
       if (autoRefreshDevices.checked) {
         requestDeviceScan();
-        deviceRefreshTimer = setInterval(requestDeviceScan, 2000);
+        deviceRefreshTimer = setInterval(requestDeviceScan, 5000);
       }
     });
     if (autoRefreshDevices.checked) {
-      deviceRefreshTimer = setInterval(requestDeviceScan, 2000);
+      deviceRefreshTimer = setInterval(requestDeviceScan, 5000);
     }
   }
 
@@ -3908,10 +4348,7 @@ window.addEventListener("DOMContentLoaded", () => {
   if (gyroZeroRollPitchBtn) {
     gyroZeroRollPitchBtn.addEventListener("click", zeroImuRollPitchDisplay);
   }
-  const gyroToggleImuDetailsBtn = $("gyro-toggle-imu-details-btn");
-  if (gyroToggleImuDetailsBtn) {
-    gyroToggleImuDetailsBtn.addEventListener("click", toggleGyroImuDetails);
-  }
+  setupGyroPanel();
   setupInitialFocus();
 
   // Make all panels with drag handles draggable

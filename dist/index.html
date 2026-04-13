@@ -165,8 +165,8 @@
         }
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-DoVv6mqo.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-BiCb2mIu.css">
+    <script type="module" crossorigin src="/assets/index-D6HAmfSU.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-QeHvhZ68.css">
   </head>
   <body>
     <header class="app-header">
@@ -419,11 +419,6 @@
         <div class="panel-drag-handle" data-drag-panel="testing-panel">
           <h2>Testing</h2>
         </div>
-        <p class="hint">
-          Press Enter or <strong>Set</strong> to publish inner / outer / servo to ROS. The
-          <strong>Render</strong> panel uses IMU <strong>roll</strong> and <strong>pitch</strong> from
-          <strong>Gyro</strong> (<code>/lN/imu/roll_pitch_deg</code>).
-        </p>
 
         <div class="stepper-grid" id="stepper-grid">
           <!-- Rows injected by app.js -->
@@ -443,9 +438,6 @@
         <div class="panel-drag-handle" data-drag-panel="trajectory-panel">
           <h2>Trajectory</h2>
         </div>
-        <p class="hint">
-          Leg commands stream live below. Global pose sequence is available on demand.
-        </p>
         <div class="trajectory-panel-actions">
           <button
             type="button"
@@ -490,11 +482,6 @@
         <div class="panel-drag-handle" data-drag-panel="gyro-panel">
           <h2>Gyro</h2>
         </div>
-        <p class="hint">
-          Each leg has its own filtered <code>/lN/imu/data</code> (<code>sensor_msgs/Imu</code>) and compact
-          <code>/lN/imu/roll_pitch_deg</code> (<code>std_msgs/String</code>, e.g.
-          <code>roll_deg=12.34,pitch_deg=-5.67</code>). Debug unfiltered: <code>/lN/imu/data_raw</code> below.
-        </p>
 
         <div class="gyro-panel-actions">
           <button
@@ -503,14 +490,14 @@
             class="gyro-zero-roll-pitch-btn"
             title="Use each leg’s current roll/pitch as a shared 0° reference for all connected clients"
           >
-            Zero roll / pitch (home)
+            Zero
           </button>
           <button
             type="button"
             id="gyro-toggle-imu-details-btn"
-            class="gyro-toggle-imu-details-btn is-active"
-            aria-expanded="true"
-            title="Show or hide per-leg /imu/data details"
+            class="gyro-toggle-imu-details-btn"
+            aria-expanded="false"
+            title="Show or hide IMU details"
           >
             <span class="gyro-toggle-imu-details-icon" aria-hidden="true">
               <span></span>
@@ -520,112 +507,37 @@
             <span class="sr-only">Toggle IMU data details</span>
           </button>
         </div>
-        <p class="hint gyro-zero-ref-hint">
-          <strong>Zero roll / pitch</strong> now sends a shared host-side zero-reference command so all
-          connected clients agree. It does not command the robot or change IMU firmware calibration.
-        </p>
 
         <div class="leg-imu-grid" role="group" aria-label="Per-leg IMU">
           <article class="leg-imu-card" data-leg-key="l0">
             <h3 class="leg-imu-card-title">L0 IMU</h3>
-            <div class="gyro-block-label"><code>/l0/imu/roll_pitch_deg</code></div>
             <div class="imu-readout imu-readout-compact" data-leg-roll-pitch="l0" role="status">—</div>
             <div class="gyro-imu-detail">
-              <div class="gyro-block-label"><code>/l0/imu/data</code></div>
               <pre class="trajectory-pre gyro-leg-imu-pre" data-leg-imu-filtered="l0" tabindex="0">—</pre>
             </div>
           </article>
           <article class="leg-imu-card" data-leg-key="l1">
             <h3 class="leg-imu-card-title">L1 IMU</h3>
-            <div class="gyro-block-label"><code>/l1/imu/roll_pitch_deg</code></div>
             <div class="imu-readout imu-readout-compact" data-leg-roll-pitch="l1" role="status">—</div>
             <div class="gyro-imu-detail">
-              <div class="gyro-block-label"><code>/l1/imu/data</code></div>
               <pre class="trajectory-pre gyro-leg-imu-pre" data-leg-imu-filtered="l1" tabindex="0">—</pre>
             </div>
           </article>
           <article class="leg-imu-card" data-leg-key="l2">
             <h3 class="leg-imu-card-title">L2 IMU</h3>
-            <div class="gyro-block-label"><code>/l2/imu/roll_pitch_deg</code></div>
             <div class="imu-readout imu-readout-compact" data-leg-roll-pitch="l2" role="status">—</div>
             <div class="gyro-imu-detail">
-              <div class="gyro-block-label"><code>/l2/imu/data</code></div>
               <pre class="trajectory-pre gyro-leg-imu-pre" data-leg-imu-filtered="l2" tabindex="0">—</pre>
             </div>
           </article>
           <article class="leg-imu-card" data-leg-key="l3">
             <h3 class="leg-imu-card-title">L3 IMU</h3>
-            <div class="gyro-block-label"><code>/l3/imu/roll_pitch_deg</code></div>
             <div class="imu-readout imu-readout-compact" data-leg-roll-pitch="l3" role="status">—</div>
             <div class="gyro-imu-detail">
-              <div class="gyro-block-label"><code>/l3/imu/data</code></div>
               <pre class="trajectory-pre gyro-leg-imu-pre" data-leg-imu-filtered="l3" tabindex="0">—</pre>
             </div>
           </article>
         </div>
-
-        <div class="leg-stance-viz" aria-label="Per-leg attitude prisms">
-          <div class="gyro-block-label">
-            Leg prisms <span class="leg-stance-join-note">(joined at 75% stage height)</span>
-          </div>
-          <p class="hint leg-stance-hint">
-            Driven by each leg&rsquo;s <code>/lN/imu/roll_pitch_deg</code> roll/pitch (same as the cards above).
-          </p>
-          <div class="leg-stance-stage">
-            <div class="leg-stance-world">
-              <div class="leg-stance-hub" title="Common joint: 75% up from the foot plane"></div>
-              <div class="leg-stance-arm" data-leg-stance="l0">
-                <div class="leg-stance-rot" data-leg-stance-rot="l0">
-                  <div class="leg-stance-prism" aria-hidden="true"></div>
-                </div>
-              </div>
-              <div class="leg-stance-arm" data-leg-stance="l1">
-                <div class="leg-stance-rot" data-leg-stance-rot="l1">
-                  <div class="leg-stance-prism" aria-hidden="true"></div>
-                </div>
-              </div>
-              <div class="leg-stance-arm" data-leg-stance="l2">
-                <div class="leg-stance-rot" data-leg-stance-rot="l2">
-                  <div class="leg-stance-prism" aria-hidden="true"></div>
-                </div>
-              </div>
-              <div class="leg-stance-arm" data-leg-stance="l3">
-                <div class="leg-stance-rot" data-leg-stance-rot="l3">
-                  <div class="leg-stance-prism" aria-hidden="true"></div>
-                </div>
-              </div>
-              <div class="leg-stance-ground" aria-hidden="true"></div>
-            </div>
-          </div>
-          <div class="leg-stance-legend" role="list">
-            <span class="leg-stance-legend-item" data-leg-stance-label="l0" role="listitem">l0 r 0.0° p 0.0°</span>
-            <span class="leg-stance-legend-item" data-leg-stance-label="l1" role="listitem">l1 r 0.0° p 0.0°</span>
-            <span class="leg-stance-legend-item" data-leg-stance-label="l2" role="listitem">l2 r 0.0° p 0.0°</span>
-            <span class="leg-stance-legend-item" data-leg-stance-label="l3" role="listitem">l3 r 0.0° p 0.0°</span>
-          </div>
-        </div>
-
-        <details class="imu-debug-details">
-          <summary>Debug: per-leg <code>/lN/imu/data_raw</code> (<code>sensor_msgs/Imu</code>)</summary>
-          <div class="gyro-debug-inner leg-imu-debug-grid">
-            <div>
-              <div class="gyro-block-label">L0 — <code>/l0/imu/data_raw</code></div>
-              <pre class="trajectory-pre gyro-debug-pre" data-leg-imu-raw="l0" tabindex="0">—</pre>
-            </div>
-            <div>
-              <div class="gyro-block-label">L1 — <code>/l1/imu/data_raw</code></div>
-              <pre class="trajectory-pre gyro-debug-pre" data-leg-imu-raw="l1" tabindex="0">—</pre>
-            </div>
-            <div>
-              <div class="gyro-block-label">L2 — <code>/l2/imu/data_raw</code></div>
-              <pre class="trajectory-pre gyro-debug-pre" data-leg-imu-raw="l2" tabindex="0">—</pre>
-            </div>
-            <div>
-              <div class="gyro-block-label">L3 — <code>/l3/imu/data_raw</code></div>
-              <pre class="trajectory-pre gyro-debug-pre" data-leg-imu-raw="l3" tabindex="0">—</pre>
-            </div>
-          </div>
-        </details>
       </section>
 
       <section
@@ -658,9 +570,6 @@
         <div class="panel-drag-handle" data-drag-panel="planner-status-panel">
           <h2>Planner</h2>
         </div>
-        <p class="hint">
-          Subscribes to <code>/planner/status</code> (<code>std_msgs/String</code>) when ROS is connected.
-        </p>
         <div class="planner-status-body">
           <div class="planner-status-row">
             <span class="planner-field-label">State</span>
@@ -674,9 +583,20 @@
             <span class="planner-field-label">Progress</span>
             <span id="planner-progress">—</span>
           </div>
+          <div class="planner-status-row">
+            <span class="planner-field-label">Reached band</span>
+            <div class="planner-reached-band-controls">
+              <span id="planner-reached-band" class="planner-band-state planner-band-disabled">—</span>
+              <label class="planner-toggle" for="planner-reached-band-toggle">
+                <input id="planner-reached-band-toggle" type="checkbox" />
+                <span>Require IMU reached</span>
+              </label>
+            </div>
+          </div>
           <div class="planner-progress-track" aria-hidden="true">
             <div id="planner-progress-bar" class="planner-progress-fill"></div>
           </div>
+          <div id="planner-leg-status-list" class="planner-leg-status-list" aria-live="polite"></div>
         </div>
       </section>
 
@@ -725,10 +645,6 @@
         <div class="panel-drag-handle" data-drag-panel="listen-panel">
           <h2>Listen</h2>
         </div>
-        <p class="hint">
-          Subscribe to a ROS topic through rosbridge, or ask the gateway to bind a UDP port and
-          stream packets into this panel.
-        </p>
 
         <div class="listen-mode-row" role="tablist" aria-label="Listener mode">
           <button
@@ -861,6 +777,50 @@
         <button type="button" data-panel-target="log-panel">Log</button>
         <div class="panel-launcher-layout" role="group" aria-label="Saved layout">
           <span class="panel-launcher-layout-label">Layout</span>
+          <div class="panel-launcher-layout-actions">
+            <button
+              type="button"
+              id="ui-layout-save-btn"
+              title="Save the current panel layout as a local preset"
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              id="ui-layout-preset-btn"
+              title="Pick a saved local layout preset"
+              aria-expanded="false"
+              aria-controls="ui-layout-preset-menu"
+            >
+              Preset
+            </button>
+          </div>
+          <div
+            id="ui-layout-preset-menu"
+            class="ui-layout-preset-menu"
+            role="group"
+            aria-label="Saved layout presets"
+            hidden
+          >
+            <label class="ui-layout-preset-field" for="ui-layout-preset-select">
+              <span class="ui-layout-preset-label">Saved presets</span>
+              <select id="ui-layout-preset-select" aria-label="Select a saved layout preset">
+                <option value="">No saved presets</option>
+              </select>
+            </label>
+            <div class="ui-layout-preset-actions">
+              <button type="button" id="ui-layout-preset-load-btn">Load</button>
+              <button
+                type="button"
+                id="ui-layout-preset-delete-btn"
+                class="ui-layout-preset-delete-btn"
+                title="Delete selected preset"
+                aria-label="Delete selected preset"
+              >
+                <span aria-hidden="true">&#128465;</span>
+              </button>
+            </div>
+          </div>
           <button
             type="button"
             id="ui-layout-export-btn"
