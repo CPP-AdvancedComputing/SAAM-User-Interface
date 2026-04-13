@@ -282,6 +282,10 @@ function $(id) {
   return document.getElementById(id);
 }
 
+function isCommandsPopoutMode() {
+  return document.body.classList.contains("commands-popout-mode");
+}
+
 function nowTime() {
   const d = new Date();
   return d.toLocaleTimeString(undefined, { hour12: false });
@@ -1647,7 +1651,7 @@ const CMD_FIELDS = {
 };
 
 const CMD_DEFAULTS = {
-  inner: 0, outer: 0, servo: 0, value: 0, command: "", count: "5",
+  inner: 0, outer: 0, servo: 0, value: 0, command: "", count: "1",
 };
 
 const WALK_SEQUENCE_VALUE_LABELS = Object.freeze(["I", "O", "H", "Δ"]);
@@ -1659,15 +1663,10 @@ const WALK_SEQUENCE_COLUMN_CONFIG = Object.freeze([
 ]);
 const WALK_SEQUENCE_DELTA_INDEX = 3;
 const LEGACY_WALK_SEQUENCE_VALUE_COUNT = 6;
+const DEFAULT_WALK_COUNT = 1;
 const DEFAULT_WALK_GLOBAL_DELTA = 3;
 
 const DEFAULT_WALK_SEQUENCE = [
-  [
-    [0, 0, 0, DEFAULT_WALK_GLOBAL_DELTA],
-    [0, 0, 30, DEFAULT_WALK_GLOBAL_DELTA],
-    [0, 0, 0, DEFAULT_WALK_GLOBAL_DELTA],
-    [0, 0, 0, DEFAULT_WALK_GLOBAL_DELTA],
-  ],
   [
     [0, 0, 0, DEFAULT_WALK_GLOBAL_DELTA],
     [0, 0, 0, DEFAULT_WALK_GLOBAL_DELTA],
@@ -1677,6 +1676,8 @@ const DEFAULT_WALK_SEQUENCE = [
 ];
 
 const WALK_SEQUENCE_STORAGE_KEY = "sam-ui-walk-sequence-v1";
+const WALK_PRESETS_STORAGE_KEY = "sam-ui-walk-presets-v1";
+let walkPresetGlobalEventsInstalled = false;
 
 function buildDefaultWalkSequenceText() {
   return JSON.stringify(DEFAULT_WALK_SEQUENCE, null, 2);
@@ -1714,6 +1715,43 @@ function loadStoredWalkSequenceText() {
     console.warn("[cmd] Could not read saved walk sequence", err);
   }
   return buildDefaultWalkSequenceText();
+}
+
+function loadStoredWalkPresets() {
+  try {
+    const raw = localStorage.getItem(WALK_PRESETS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((entry) => entry && typeof entry === "object" && typeof entry.name === "string")
+      .map((entry) => {
+        const countValue = Number.parseInt(String(entry.count ?? DEFAULT_WALK_COUNT), 10);
+        const count =
+          Number.isFinite(countValue) && countValue >= 1
+            ? String(countValue)
+            : String(DEFAULT_WALK_COUNT);
+        const sequence = Array.isArray(entry.sequence)
+          ? normalizeWalkSequence(entry.sequence)
+          : DEFAULT_WALK_SEQUENCE;
+        return {
+          name: String(entry.name).trim(),
+          count,
+          sequence,
+          savedAt:
+            typeof entry.savedAt === "string" && entry.savedAt
+              ? entry.savedAt
+              : new Date().toISOString(),
+        };
+      })
+      .filter((entry) => entry.name);
+  } catch (_err) {
+    return [];
+  }
+}
+
+function persistWalkPresets(presets) {
+  localStorage.setItem(WALK_PRESETS_STORAGE_KEY, JSON.stringify(presets));
 }
 
 function persistWalkSequenceText(rawText) {
@@ -2004,10 +2042,289 @@ function renderWalkSequenceTableEditor(sequenceOverride = null) {
 }
 
 function resetWalkSequenceEditor() {
-  syncWalkSequenceText(DEFAULT_WALK_SEQUENCE);
+  const textarea = $("cmd-f-walk-sequence");
+  const countInput = $("cmd-f-count");
+  let cyclePoseCount = DEFAULT_WALK_COUNT;
+
+  if (textarea instanceof HTMLTextAreaElement) {
+    try {
+      cyclePoseCount = parseWalkSequenceInput(textarea.value).length || DEFAULT_WALK_COUNT;
+    } catch (_err) {
+      cyclePoseCount = DEFAULT_WALK_COUNT;
+    }
+  }
+
+  syncWalkSequenceText(resizeWalkSequence(DEFAULT_WALK_SEQUENCE, cyclePoseCount));
+
+  if (countInput instanceof HTMLInputElement) {
+    countInput.value = String(DEFAULT_WALK_COUNT);
+  }
+}
+
+function buildCurrentWalkPresetState() {
+  const countInput = $("cmd-f-count");
+  const textarea = $("cmd-f-walk-sequence");
+  const countValue = Number.parseInt(String(countInput?.value ?? DEFAULT_WALK_COUNT), 10);
+  const count =
+    Number.isFinite(countValue) && countValue >= 1
+      ? String(countValue)
+      : String(DEFAULT_WALK_COUNT);
+  const sequence =
+    textarea instanceof HTMLTextAreaElement
+      ? parseWalkSequenceInput(textarea.value)
+      : DEFAULT_WALK_SEQUENCE;
+  return { count, sequence };
+}
+
+function applyWalkPresetState(state) {
+  if (!state || typeof state !== "object") return false;
+  const countInput = $("cmd-f-count");
+  if (countInput instanceof HTMLInputElement) {
+    countInput.value = String(state.count ?? DEFAULT_WALK_COUNT);
+  }
+  try {
+    syncWalkSequenceText(normalizeWalkSequence(state.sequence ?? DEFAULT_WALK_SEQUENCE));
+    return true;
+  } catch (_err) {
+    return false;
+  }
+}
+
+function refreshWalkPresetPicker() {
+  const select = $("cmd-walk-preset-select");
+  const loadBtn = $("cmd-walk-preset-load-btn");
+  const deleteBtn = $("cmd-walk-preset-delete-btn");
+  if (!(select instanceof HTMLSelectElement)) return [];
+
+  const presets = loadStoredWalkPresets().sort((a, b) => {
+    return new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime();
+  });
+
+  const previousValue = select.value;
+  select.innerHTML = "";
+
+  if (presets.length === 0) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No saved presets";
+    select.appendChild(option);
+    select.disabled = true;
+    if (loadBtn instanceof HTMLButtonElement) loadBtn.disabled = true;
+    if (deleteBtn instanceof HTMLButtonElement) deleteBtn.disabled = true;
+    return presets;
+  }
+
+  presets.forEach((preset) => {
+    const option = document.createElement("option");
+    option.value = preset.name;
+    option.textContent = preset.name;
+    select.appendChild(option);
+  });
+
+  select.disabled = false;
+  select.value = presets.some((preset) => preset.name === previousValue) ? previousValue : presets[0].name;
+  if (loadBtn instanceof HTMLButtonElement) loadBtn.disabled = false;
+  if (deleteBtn instanceof HTMLButtonElement) deleteBtn.disabled = false;
+  positionWalkPresetMenu();
+  return presets;
+}
+
+function bringWalkPresetMenuToFront() {
+  const menu = $("cmd-walk-preset-menu");
+  if (!(menu instanceof HTMLElement)) return;
+  recomputePanelZCounterFromDom();
+  menu.style.zIndex = String(Math.max(panelZCounter + 2, 1002));
+}
+
+function getWalkPresetAnchorButton() {
+  const presetBtn = $("cmd-walk-preset-btn");
+  if (presetBtn instanceof HTMLButtonElement) return presetBtn;
+  const saveBtn = $("cmd-save-btn");
+  if (saveBtn instanceof HTMLButtonElement && saveBtn.textContent?.trim() === "Load") return saveBtn;
+  return null;
+}
+
+function positionWalkPresetMenu() {
+  const btn = getWalkPresetAnchorButton();
+  const menu = $("cmd-walk-preset-menu");
+  if (!(btn instanceof HTMLButtonElement) || !(menu instanceof HTMLElement) || menu.hidden) return;
+
+  const buttonRect = btn.getBoundingClientRect();
+  const menuRect = menu.getBoundingClientRect();
+  const gap = 10;
+  const preferredLeft = Math.round(buttonRect.right + gap);
+  const fallbackLeft = Math.round(buttonRect.left - menuRect.width - gap);
+  const left =
+    preferredLeft + menuRect.width <= window.innerWidth - 8
+      ? preferredLeft
+      : Math.max(8, fallbackLeft);
+  const top = Math.min(
+    Math.max(8, Math.round(buttonRect.top + buttonRect.height / 2 - menuRect.height / 2)),
+    Math.max(8, window.innerHeight - menuRect.height - 8)
+  );
+
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+function toggleWalkPresetMenu(forceOpen = null) {
+  const btn = getWalkPresetAnchorButton();
+  const menu = $("cmd-walk-preset-menu");
+  if (!(btn instanceof HTMLButtonElement) || !(menu instanceof HTMLElement)) return false;
+
+  const shouldOpen = forceOpen == null ? menu.hidden : !!forceOpen;
+  if (shouldOpen) {
+    menu.style.visibility = "hidden";
+    menu.hidden = false;
+    bringWalkPresetMenuToFront();
+    refreshWalkPresetPicker();
+    positionWalkPresetMenu();
+    menu.style.visibility = "";
+  } else {
+    menu.hidden = true;
+    menu.style.visibility = "";
+    menu.style.zIndex = "";
+  }
+  btn.setAttribute("aria-expanded", String(shouldOpen));
+  return shouldOpen;
+}
+
+function saveCurrentWalkPreset() {
+  let state;
+  try {
+    state = buildCurrentWalkPresetState();
+  } catch (err) {
+    logLine("ERROR", err instanceof Error ? err.message : "Walk preset data is invalid");
+    return;
+  }
+
+  const suggestedName = `Walk ${new Date().toLocaleString()}`;
+  const rawName = window.prompt("Save current walk setup as preset:", suggestedName);
+  if (rawName == null) return;
+
+  const name = rawName.trim();
+  if (!name) {
+    logLine("ERROR", "Walk preset name cannot be empty");
+    return;
+  }
+
+  const presets = loadStoredWalkPresets();
+  const existingIndex = presets.findIndex((preset) => preset.name === name);
+  if (existingIndex >= 0 && !window.confirm(`Overwrite the saved walk preset "${name}"?`)) {
+    return;
+  }
+
+  const entry = {
+    name,
+    count: state.count,
+    sequence: state.sequence,
+    savedAt: new Date().toISOString(),
+  };
+
+  if (existingIndex >= 0) presets.splice(existingIndex, 1, entry);
+  else presets.push(entry);
+
+  try {
+    persistWalkPresets(presets);
+    refreshWalkPresetPicker();
+    const select = $("cmd-walk-preset-select");
+    if (select instanceof HTMLSelectElement) select.value = name;
+    positionWalkPresetMenu();
+    logLine("INFO", `Walk preset saved locally as "${name}"`);
+  } catch (_err) {
+    logLine("ERROR", "Could not save walk preset to browser storage");
+  }
+}
+
+function loadSelectedWalkPreset() {
+  const select = $("cmd-walk-preset-select");
+  if (!(select instanceof HTMLSelectElement)) return;
+  const name = select.value;
+  if (!name) {
+    logLine("ERROR", "Choose a walk preset first");
+    return;
+  }
+
+  const preset = loadStoredWalkPresets().find((entry) => entry.name === name);
+  if (!preset) {
+    logLine("ERROR", `Could not find walk preset "${name}"`);
+    refreshWalkPresetPicker();
+    return;
+  }
+
+  if (!applyWalkPresetState(preset)) {
+    logLine("ERROR", `Saved walk preset "${name}" is invalid`);
+    refreshWalkPresetPicker();
+    return;
+  }
+
+  toggleWalkPresetMenu(false);
+  logLine("INFO", `Loaded walk preset "${name}"`);
+}
+
+function deleteSelectedWalkPreset() {
+  const select = $("cmd-walk-preset-select");
+  if (!(select instanceof HTMLSelectElement)) return;
+  const name = select.value;
+  if (!name) {
+    logLine("ERROR", "Choose a walk preset first");
+    return;
+  }
+
+  if (!window.confirm(`Delete the saved walk preset "${name}"?`)) {
+    return;
+  }
+
+  const presets = loadStoredWalkPresets();
+  const nextPresets = presets.filter((entry) => entry.name !== name);
+  if (nextPresets.length === presets.length) {
+    logLine("ERROR", `Could not find walk preset "${name}"`);
+    refreshWalkPresetPicker();
+    return;
+  }
+
+  try {
+    persistWalkPresets(nextPresets);
+    refreshWalkPresetPicker();
+    positionWalkPresetMenu();
+    logLine("INFO", `Deleted walk preset "${name}"`);
+  } catch (_err) {
+    logLine("ERROR", "Could not delete walk preset from browser storage");
+  }
+}
+
+function setupWalkPresetMenuGlobalHandlers() {
+  if (walkPresetGlobalEventsInstalled) return;
+  walkPresetGlobalEventsInstalled = true;
+
+  document.addEventListener("click", (event) => {
+    const menu = $("cmd-walk-preset-menu");
+    const btn = getWalkPresetAnchorButton();
+    const target = event.target;
+    if (!(target instanceof Node)) return;
+    if (
+      menu instanceof HTMLElement &&
+      !menu.hidden &&
+      !menu.contains(target) &&
+      !(btn instanceof HTMLElement && btn.contains(target))
+    ) {
+      toggleWalkPresetMenu(false);
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      toggleWalkPresetMenu(false);
+    }
+  });
+
+  window.addEventListener("resize", () => {
+    positionWalkPresetMenu();
+  });
 }
 
 function appendWalkSequenceEditor(container) {
+  const isPopout = isCommandsPopoutMode();
   const group = document.createElement("div");
   group.className = "field-group field-group-wide";
 
@@ -2018,14 +2335,41 @@ function appendWalkSequenceEditor(container) {
   lbl.setAttribute("for", "cmd-f-walk-sequence");
   lbl.textContent = "sequence";
 
+  const actionGroup = document.createElement("div");
+  actionGroup.className = "cmd-walk-preset-actions";
+
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "cmd-inline-btn";
+  saveBtn.textContent = "Save";
+  saveBtn.addEventListener("click", saveCurrentWalkPreset);
+
+  const loadBtn = document.createElement("button");
+  loadBtn.type = "button";
+  loadBtn.id = "cmd-walk-preset-btn";
+  loadBtn.className = "cmd-inline-btn";
+  loadBtn.textContent = "Load";
+  loadBtn.setAttribute("aria-expanded", "false");
+  loadBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleWalkPresetMenu();
+  });
+
   const resetBtn = document.createElement("button");
   resetBtn.type = "button";
   resetBtn.className = "cmd-inline-btn";
   resetBtn.textContent = "Reset Default";
   resetBtn.addEventListener("click", resetWalkSequenceEditor);
 
-  header.appendChild(lbl);
-  header.appendChild(resetBtn);
+  if (isPopout) {
+    header.appendChild(lbl);
+    actionGroup.appendChild(saveBtn);
+  }
+  actionGroup.appendChild(loadBtn);
+  if (isPopout) {
+    actionGroup.appendChild(resetBtn);
+  }
+  header.appendChild(actionGroup);
 
   const controls = document.createElement("div");
   controls.className = "cmd-walk-sequence-controls";
@@ -2086,53 +2430,112 @@ function appendWalkSequenceEditor(container) {
   status.id = "cmd-walk-sequence-status";
   status.className = "cmd-inline-status";
 
-  group.appendChild(header);
-  group.appendChild(controls);
-  group.appendChild(details);
-  group.appendChild(textarea);
-  group.appendChild(status);
-  container.appendChild(group);
+  const presetMenu = document.createElement("div");
+  presetMenu.id = "cmd-walk-preset-menu";
+  presetMenu.className = "cmd-walk-preset-menu";
+  presetMenu.hidden = true;
 
-  updateWalkSequenceStatus();
-  renderWalkSequenceTableEditor();
+  const presetField = document.createElement("div");
+  presetField.className = "cmd-walk-preset-field";
+
+  const presetLabel = document.createElement("label");
+  presetLabel.className = "cmd-walk-preset-label";
+  presetLabel.setAttribute("for", "cmd-walk-preset-select");
+  presetLabel.textContent = "Saved walk presets";
+
+  const presetSelect = document.createElement("select");
+  presetSelect.id = "cmd-walk-preset-select";
+  presetSelect.setAttribute("aria-label", "Choose a saved walk preset");
+  presetSelect.addEventListener("dblclick", loadSelectedWalkPreset);
+
+  const presetActions = document.createElement("div");
+  presetActions.className = "cmd-walk-preset-menu-actions";
+
+  const presetLoadBtn = document.createElement("button");
+  presetLoadBtn.type = "button";
+  presetLoadBtn.id = "cmd-walk-preset-load-btn";
+  presetLoadBtn.className = "cmd-inline-btn";
+  presetLoadBtn.textContent = "Load";
+  presetLoadBtn.addEventListener("click", loadSelectedWalkPreset);
+
+  const presetDeleteBtn = document.createElement("button");
+  presetDeleteBtn.type = "button";
+  presetDeleteBtn.id = "cmd-walk-preset-delete-btn";
+  presetDeleteBtn.className = "cmd-walk-preset-delete-btn";
+  presetDeleteBtn.textContent = "🗑";
+  presetDeleteBtn.title = "Delete selected walk preset";
+  presetDeleteBtn.setAttribute("aria-label", "Delete selected walk preset");
+  presetDeleteBtn.addEventListener("click", deleteSelectedWalkPreset);
+
+  presetField.appendChild(presetLabel);
+  presetField.appendChild(presetSelect);
+  presetActions.appendChild(presetLoadBtn);
+  presetActions.appendChild(presetDeleteBtn);
+  presetMenu.appendChild(presetField);
+  presetMenu.appendChild(presetActions);
+
+  if (isPopout) {
+    group.appendChild(header);
+    group.appendChild(controls);
+    group.appendChild(details);
+    group.appendChild(status);
+    container.appendChild(group);
+  } else {
+    group.hidden = true;
+  }
+
+  group.appendChild(textarea);
+  container.appendChild(group);
+  container.appendChild(presetMenu);
+
+  if (isPopout) {
+    updateWalkSequenceStatus();
+    renderWalkSequenceTableEditor();
+  }
+  refreshWalkPresetPicker();
+  setupWalkPresetMenuGlobalHandlers();
+}
+
+function syncCommandActionButtons(type) {
+  const saveBtn = $("cmd-save-btn");
+  if (!(saveBtn instanceof HTMLButtonElement)) return;
+
+  const mainWalkMode = type === "walk" && !isCommandsPopoutMode();
+  saveBtn.replaceWith(saveBtn.cloneNode(true));
+  const nextSaveBtn = $("cmd-save-btn");
+  if (!(nextSaveBtn instanceof HTMLButtonElement)) return;
+
+  if (mainWalkMode) {
+    nextSaveBtn.textContent = "Load";
+    nextSaveBtn.setAttribute("aria-haspopup", "dialog");
+    nextSaveBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      toggleWalkPresetMenu();
+    });
+  } else {
+    nextSaveBtn.textContent = "Save";
+    nextSaveBtn.removeAttribute("aria-haspopup");
+    nextSaveBtn.addEventListener("click", addSavedCommand);
+  }
 }
 
 function buildCmdFields() {
   const type = $("cmd-type").value;
+  const isPopout = isCommandsPopoutMode();
   const legGroup = $("cmd-leg-group");
   if (legGroup) legGroup.hidden = type === "walk";
+  toggleWalkPresetMenu(false);
   const container = $("cmd-fields");
   container.innerHTML = "";
 
   if (type === "walk") {
-    const walkOptionsRow = document.createElement("div");
-    walkOptionsRow.className = "cmd-row cmd-walk-options-row";
-
-    const countGroup = document.createElement("div");
-    countGroup.className = "field-group";
-
-    const countLabel = document.createElement("label");
-    countLabel.setAttribute("for", "cmd-f-count");
-    countLabel.textContent = "Steps";
-
     const countInput = document.createElement("input");
     countInput.type = "number";
     countInput.id = "cmd-f-count";
     countInput.min = "1";
     countInput.step = "1";
-    countInput.value = CMD_DEFAULTS.count ?? "5";
+    countInput.value = CMD_DEFAULTS.count ?? String(DEFAULT_WALK_COUNT);
     countInput.addEventListener("focus", () => countInput.select());
-
-    countGroup.appendChild(countLabel);
-    countGroup.appendChild(countInput);
-    walkOptionsRow.appendChild(countGroup);
-
-    const deltaGroup = document.createElement("div");
-    deltaGroup.className = "field-group";
-
-    const deltaLabel = document.createElement("label");
-    deltaLabel.setAttribute("for", "cmd-f-global-delta");
-    deltaLabel.textContent = "Global Delta";
 
     const deltaInput = document.createElement("input");
     deltaInput.type = "number";
@@ -2149,11 +2552,35 @@ function buildCmdFields() {
       applyGlobalWalkDelta(deltaInput.value);
     });
 
-    deltaGroup.appendChild(deltaLabel);
-    deltaGroup.appendChild(deltaInput);
-    walkOptionsRow.appendChild(deltaGroup);
+    if (isPopout) {
+      const walkOptionsRow = document.createElement("div");
+      walkOptionsRow.className = "cmd-row cmd-walk-options-row";
 
-    container.appendChild(walkOptionsRow);
+      const countGroup = document.createElement("div");
+      countGroup.className = "field-group";
+      const countLabel = document.createElement("label");
+      countLabel.setAttribute("for", "cmd-f-count");
+      countLabel.textContent = "Steps";
+      countGroup.appendChild(countLabel);
+      countGroup.appendChild(countInput);
+      walkOptionsRow.appendChild(countGroup);
+
+      const deltaGroup = document.createElement("div");
+      deltaGroup.className = "field-group";
+      const deltaLabel = document.createElement("label");
+      deltaLabel.setAttribute("for", "cmd-f-global-delta");
+      deltaLabel.textContent = "Global Delta";
+      deltaGroup.appendChild(deltaLabel);
+      deltaGroup.appendChild(deltaInput);
+      walkOptionsRow.appendChild(deltaGroup);
+
+      container.appendChild(walkOptionsRow);
+    } else {
+      countInput.hidden = true;
+      deltaInput.hidden = true;
+      container.appendChild(countInput);
+      container.appendChild(deltaInput);
+    }
   }
 
   (CMD_FIELDS[type] || []).forEach((field) => {
@@ -2200,6 +2627,7 @@ function buildCmdFields() {
     appendWalkSequenceEditor(container);
   }
 
+  syncCommandActionButtons(type);
   updateCmdPreview();
 }
 
@@ -2209,7 +2637,7 @@ function buildCmdPayload() {
 
   if (type === "walk") {
     const countEl = $("cmd-f-count");
-    const count = countEl ? String(countEl.value || "").trim() || "5" : "5";
+    const count = countEl ? String(countEl.value || "").trim() || String(DEFAULT_WALK_COUNT) : String(DEFAULT_WALK_COUNT);
     const sequenceEl = $("cmd-f-walk-sequence");
     const sequenceText =
       sequenceEl instanceof HTMLTextAreaElement

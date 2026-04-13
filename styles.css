@@ -1759,6 +1759,20 @@ button:disabled {
   font-size: 0.72rem;
 }
 
+.cmd-walk-preset-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.cmd-walk-main-actions {
+  display: flex;
+  justify-content: flex-start;
+  margin-bottom: 8px;
+}
+
 .cmd-walk-sequence-input {
   min-height: 220px;
   font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
@@ -1798,7 +1812,77 @@ button:disabled {
 
 .cmd-walk-options-row #cmd-f-count,
 .cmd-walk-options-row #cmd-f-global-delta {
-  width: 100%;
+  width: 50%;
+  min-width: 4.5rem;
+  max-width: 8rem;
+  padding: 3px 6px;
+  font-size: 0.78rem;
+  align-self: flex-start;
+}
+
+.cmd-walk-preset-menu {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 240px;
+  padding: 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(79, 70, 229, 0.3);
+  background: rgba(7, 11, 24, 0.98);
+  box-shadow: 0 22px 38px rgba(2, 6, 23, 0.55);
+  backdrop-filter: blur(12px);
+}
+
+.cmd-walk-preset-menu[hidden] {
+  display: none !important;
+}
+
+.cmd-walk-preset-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cmd-walk-preset-label {
+  font-size: 0.72rem;
+  color: var(--text-muted, #94a3b8);
+}
+
+.cmd-walk-preset-field select {
+  min-width: 220px;
+}
+
+.cmd-walk-preset-menu-actions {
+  display: flex;
+  align-items: stretch;
+}
+
+.cmd-walk-preset-menu-actions #cmd-walk-preset-load-btn {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.cmd-walk-preset-delete-btn {
+  width: 38px;
+  min-width: 38px;
+  height: 38px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #fecaca;
+}
+
+.cmd-walk-preset-delete-btn:hover {
+  border-color: rgba(248, 113, 113, 0.85);
+  background: rgba(127, 29, 29, 0.35);
+}
+
+.cmd-walk-preset-delete-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .cmd-walk-sequence-window {
