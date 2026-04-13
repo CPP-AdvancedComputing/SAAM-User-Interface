@@ -170,6 +170,109 @@
   </head>
   <body>
     <header class="app-header">
+      <div class="app-menu-bar" role="menubar" aria-label="Application menu">
+        <div class="app-file-menu-shell">
+          <button
+            type="button"
+            id="app-file-menu-btn"
+            class="app-menu-trigger"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-controls="app-file-menu"
+          >
+            File
+          </button>
+          <div
+            id="app-file-menu"
+            class="app-file-menu"
+            role="menu"
+            aria-label="File menu"
+            hidden
+          >
+            <button
+              type="button"
+              id="ui-layout-save-btn"
+              class="app-file-menu-item"
+              role="menuitem"
+              title="Save the current panel layout as a local preset"
+            >
+              Save Layout
+            </button>
+            <button
+              type="button"
+              id="ui-layout-preset-btn"
+              class="app-file-menu-item app-file-menu-item-submenu"
+              role="menuitem"
+              title="Pick a saved local layout preset"
+              aria-expanded="false"
+              aria-controls="ui-layout-preset-menu"
+            >
+              Presets
+            </button>
+            <button
+              type="button"
+              id="ui-layout-export-btn"
+              class="app-file-menu-item"
+              role="menuitem"
+              title="Download panel layout and open panels as JSON"
+            >
+              Export Layout
+            </button>
+            <button
+              type="button"
+              id="ui-layout-import-btn"
+              class="app-file-menu-item"
+              role="menuitem"
+              title="Load layout from a JSON file"
+            >
+              Import Layout
+            </button>
+            <div class="app-file-menu-separator" aria-hidden="true"></div>
+            <button
+              type="button"
+              id="ui-layout-reset-btn"
+              class="app-file-menu-item ui-layout-reset-btn"
+              role="menuitem"
+              title="Close all panels"
+            >
+              Reset UI
+            </button>
+            <input
+              type="file"
+              id="ui-layout-import-input"
+              accept="application/json,.json"
+              hidden
+            />
+            <div
+              id="ui-layout-preset-menu"
+              class="ui-layout-preset-menu"
+              role="group"
+              aria-label="Saved layout presets"
+              hidden
+            >
+              <label class="ui-layout-preset-field" for="ui-layout-preset-select">
+                <span class="ui-layout-preset-label">Saved presets</span>
+                <select id="ui-layout-preset-select" aria-label="Select a saved layout preset">
+                  <option value="">No saved presets</option>
+                </select>
+              </label>
+              <div class="ui-layout-preset-actions">
+                <button type="button" id="ui-layout-preset-load-btn">Load</button>
+                <button
+                  type="button"
+                  id="ui-layout-preset-delete-btn"
+                  class="ui-layout-preset-delete-btn"
+                  title="Delete selected preset"
+                  aria-label="Delete selected preset"
+                >
+                  <span aria-hidden="true">&#128465;</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="app-title-group">
         <h1>S.A.A.M. Control Interface</h1>
       </div>
@@ -775,76 +878,6 @@
         <button type="button" data-panel-target="planner-status-panel">Status</button>
         <button type="button" data-panel-target="listen-panel">Listen</button>
         <button type="button" data-panel-target="log-panel">Log</button>
-        <div class="panel-launcher-layout" role="group" aria-label="Saved layout">
-          <span class="panel-launcher-layout-label">Layout</span>
-          <div class="panel-launcher-layout-actions">
-            <button
-              type="button"
-              id="ui-layout-save-btn"
-              title="Save the current panel layout as a local preset"
-            >
-              Save
-            </button>
-            <button
-              type="button"
-              id="ui-layout-preset-btn"
-              title="Pick a saved local layout preset"
-              aria-expanded="false"
-              aria-controls="ui-layout-preset-menu"
-            >
-              Preset
-            </button>
-          </div>
-          <div
-            id="ui-layout-preset-menu"
-            class="ui-layout-preset-menu"
-            role="group"
-            aria-label="Saved layout presets"
-            hidden
-          >
-            <label class="ui-layout-preset-field" for="ui-layout-preset-select">
-              <span class="ui-layout-preset-label">Saved presets</span>
-              <select id="ui-layout-preset-select" aria-label="Select a saved layout preset">
-                <option value="">No saved presets</option>
-              </select>
-            </label>
-            <div class="ui-layout-preset-actions">
-              <button type="button" id="ui-layout-preset-load-btn">Load</button>
-              <button
-                type="button"
-                id="ui-layout-preset-delete-btn"
-                class="ui-layout-preset-delete-btn"
-                title="Delete selected preset"
-                aria-label="Delete selected preset"
-              >
-                <span aria-hidden="true">&#128465;</span>
-              </button>
-            </div>
-          </div>
-          <button
-            type="button"
-            id="ui-layout-export-btn"
-            title="Download panel layout and open panels as JSON"
-          >
-            Export
-          </button>
-          <button
-            type="button"
-            id="ui-layout-import-btn"
-            title="Load layout from a JSON file"
-          >
-            Import
-          </button>
-          <input
-            type="file"
-            id="ui-layout-import-input"
-            accept="application/json,.json"
-            hidden
-          />
-          <button type="button" id="ui-layout-reset-btn" class="ui-layout-reset-btn" title="Close all panels">
-            Reset UI
-          </button>
-        </div>
       </aside>
     </main>
   </body>

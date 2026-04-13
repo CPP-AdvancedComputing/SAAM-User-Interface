@@ -178,7 +178,7 @@ function persistHotspotLegIps() {
 
 function getTrackedLegHotspotIp(leg) {
   const key = WEB_LOG_LEGS.includes(leg) ? leg : "l0";
-  return learnedHotspotLegIps[key] || DEFAULT_HOTSPOT_LEG_IPS[key] || "";
+  return DEFAULT_HOTSPOT_LEG_IPS[key] || "";
 }
 
 function buildDefaultTrackedHotspotDevices() {
@@ -193,7 +193,7 @@ function getHotspotDisplayName(ip) {
   const normalizedIp = normalizeHotspotIp(ip);
   if (!normalizedIp) return "";
   for (const leg of WEB_LOG_LEGS) {
-    if (getTrackedLegHotspotIp(leg) === normalizedIp) return leg;
+    if (DEFAULT_HOTSPOT_LEG_IPS[leg] === normalizedIp) return leg;
   }
   return "";
 }
@@ -229,14 +229,9 @@ function noteConnectedHotspotDevice(ip, name = "") {
 }
 
 function learnHotspotLegIp(leg, ip) {
-  const legKey = WEB_LOG_LEGS.includes(leg) ? leg : "";
   const normalizedIp = normalizeHotspotIp(ip);
-  if (!legKey || !isHotspotClientIp(normalizedIp)) return false;
-  const sawConnected = noteConnectedHotspotDevice(normalizedIp, legKey);
-  if (learnedHotspotLegIps[legKey] === normalizedIp) return sawConnected;
-  learnedHotspotLegIps = { ...learnedHotspotLegIps, [legKey]: normalizedIp };
-  persistHotspotLegIps();
-  return true;
+  if (!isHotspotClientIp(normalizedIp)) return false;
+  return noteConnectedHotspotDevice(normalizedIp);
 }
 
 function applyHotspotDisplayNames(devices) {
@@ -2766,6 +2761,37 @@ function clearPanelPositionStyles(panel) {
   delete panel.dataset.placed;
 }
 
+function getAppMenuBarBottom() {
+  const menuBar = document.querySelector(".app-menu-bar");
+  if (!(menuBar instanceof HTMLElement)) return 0;
+  const rect = menuBar.getBoundingClientRect();
+  if (rect.height <= 0) return 0;
+  return Math.ceil(rect.bottom);
+}
+
+function getPanelTopBoundary() {
+  return Math.max(0, getAppMenuBarBottom() + 8);
+}
+
+function clampPanelTop(topValue) {
+  return Math.max(getPanelTopBoundary(), Math.round(topValue));
+}
+
+function keepPanelBelowMenuBar(panel) {
+  if (!(panel instanceof HTMLElement) || panel.hidden) return;
+  const rect = panel.getBoundingClientRect();
+  const clampedTop = clampPanelTop(rect.top);
+  if (clampedTop === Math.round(rect.top)) return;
+  panel.style.transform = "";
+  panel.style.left = `${Math.round(rect.left)}px`;
+  panel.style.top = `${clampedTop}px`;
+  panel.style.right = "auto";
+  panel.style.bottom = "auto";
+  if (panel.id !== "terminal-panel") {
+    panel.dataset.placed = "1";
+  }
+}
+
 /**
  * @param {HTMLElement} panel
  * @param {Partial<ReturnType<typeof snapshotPanelLayout>> | null | undefined} snap
@@ -2824,7 +2850,10 @@ function applyUILayoutState(state) {
     if (!(panel instanceof HTMLElement)) continue;
     if (!snap || typeof snap !== "object") continue;
     panel.hidden = !!snap.hidden;
-    if (wide) applyPanelSnapshotStyles(panel, snap);
+    if (wide) {
+      applyPanelSnapshotStyles(panel, snap);
+      keepPanelBelowMenuBar(panel);
+    }
     else clearPanelPositionStyles(panel);
   }
 
@@ -2909,7 +2938,12 @@ function positionUILayoutPresetMenu() {
   const buttonRect = btn.getBoundingClientRect();
   const menuRect = menu.getBoundingClientRect();
   const gap = 12;
-  const left = Math.max(8, Math.round(buttonRect.left - menuRect.width - gap));
+  const preferredLeft = Math.round(buttonRect.right + gap);
+  const fallbackLeft = Math.round(buttonRect.left - menuRect.width - gap);
+  const left =
+    preferredLeft + menuRect.width <= window.innerWidth - 8
+      ? preferredLeft
+      : Math.max(8, fallbackLeft);
   const top = Math.min(
     Math.max(8, Math.round(buttonRect.top + buttonRect.height / 2 - menuRect.height / 2)),
     Math.max(8, window.innerHeight - menuRect.height - 8)
@@ -2919,11 +2953,41 @@ function positionUILayoutPresetMenu() {
   menu.style.top = `${top}px`;
 }
 
+function bringUILayoutMenusToFront() {
+  const appMenuBar = document.querySelector(".app-menu-bar");
+  const fileMenu = $("app-file-menu");
+  recomputePanelZCounterFromDom();
+  const baseZ = Math.max(panelZCounter + 1, 1000);
+  if (appMenuBar instanceof HTMLElement) appMenuBar.style.zIndex = String(baseZ);
+  if (fileMenu instanceof HTMLElement && !fileMenu.hidden) {
+    fileMenu.style.zIndex = String(baseZ + 1);
+  }
+  return baseZ;
+}
+
 function bringUILayoutPresetMenuToFront() {
   const menu = $("ui-layout-preset-menu");
   if (!(menu instanceof HTMLElement)) return;
-  recomputePanelZCounterFromDom();
-  menu.style.zIndex = String(Math.max(panelZCounter + 1, 60));
+  const baseZ = bringUILayoutMenusToFront();
+  menu.style.zIndex = String(baseZ + 2);
+}
+
+function toggleAppFileMenu(forceOpen = null) {
+  const btn = $("app-file-menu-btn");
+  const menu = $("app-file-menu");
+  if (!(btn instanceof HTMLButtonElement) || !(menu instanceof HTMLElement)) return false;
+
+  const shouldOpen = forceOpen == null ? menu.hidden : !!forceOpen;
+  if (shouldOpen) {
+    menu.hidden = false;
+    bringUILayoutMenusToFront();
+  } else {
+    toggleUILayoutPresetMenu(false);
+    menu.hidden = true;
+    menu.style.zIndex = "";
+  }
+  btn.setAttribute("aria-expanded", String(shouldOpen));
+  return shouldOpen;
 }
 
 function refreshUILayoutPresetPicker() {
@@ -2970,6 +3034,11 @@ function toggleUILayoutPresetMenu(forceOpen = null) {
   const btn = $("ui-layout-preset-btn");
   const menu = $("ui-layout-preset-menu");
   if (!(btn instanceof HTMLButtonElement) || !(menu instanceof HTMLElement)) return false;
+
+  const fileMenu = $("app-file-menu");
+  if (fileMenu instanceof HTMLElement && fileMenu.hidden && (forceOpen == null || forceOpen)) {
+    toggleAppFileMenu(true);
+  }
 
   const shouldOpen = forceOpen == null ? menu.hidden : !!forceOpen;
   if (shouldOpen) {
@@ -3023,6 +3092,7 @@ function saveCurrentUILayoutPreset() {
     const select = $("ui-layout-preset-select");
     if (select instanceof HTMLSelectElement) select.value = name;
     positionUILayoutPresetMenu();
+    toggleAppFileMenu(false);
     logLine("INFO", `UI layout preset saved locally as "${name}"`);
   } catch (_err) {
     logLine("ERROR", "Could not save layout preset to browser storage");
@@ -3055,7 +3125,7 @@ function loadSelectedUILayoutPreset() {
   } catch (_err) {
     // keep the applied state even if persistence fails
   }
-  toggleUILayoutPresetMenu(false);
+  toggleAppFileMenu(false);
   logLine("INFO", `Loaded UI layout preset "${name}"`);
 }
 
@@ -3088,28 +3158,6 @@ function deleteSelectedUILayoutPreset() {
   } catch (_err) {
     logLine("ERROR", "Could not delete layout preset from browser storage");
   }
-}
-
-function syncUILayoutActionButtonWidths() {
-  const buttons = [
-    $("ui-layout-save-btn"),
-    $("ui-layout-preset-btn"),
-    $("ui-layout-export-btn"),
-    $("ui-layout-import-btn"),
-    $("ui-layout-reset-btn"),
-  ].filter((button) => button instanceof HTMLButtonElement);
-
-  if (buttons.length === 0) return;
-
-  buttons.forEach((button) => {
-    button.style.width = "auto";
-  });
-
-  const maxWidth = Math.max(...buttons.map((button) => Math.ceil(button.getBoundingClientRect().width)));
-  const finalWidth = `${maxWidth + 4}px`;
-  buttons.forEach((button) => {
-    button.style.width = finalWidth;
-  });
 }
 
 function setupGyroPanel() {
@@ -3188,11 +3236,18 @@ function setupUILayoutPersistence() {
   const exportBtn = $("ui-layout-export-btn");
   exportBtn?.addEventListener("click", () => {
     downloadUILayoutFile();
+    toggleAppFileMenu(false);
     logLine("INFO", "UI layout exported to file");
   });
 
   const saveBtn = $("ui-layout-save-btn");
   saveBtn?.addEventListener("click", saveCurrentUILayoutPreset);
+
+  const fileMenuBtn = $("app-file-menu-btn");
+  fileMenuBtn?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleAppFileMenu();
+  });
 
   const presetBtn = $("ui-layout-preset-btn");
   presetBtn?.addEventListener("click", (event) => {
@@ -3210,27 +3265,40 @@ function setupUILayoutPersistence() {
   presetSelect?.addEventListener("dblclick", loadSelectedUILayoutPreset);
 
   document.addEventListener("click", (event) => {
+    const fileMenu = $("app-file-menu");
+    const fileBtn = $("app-file-menu-btn");
     const menu = $("ui-layout-preset-menu");
-    const btn = $("ui-layout-preset-btn");
-    if (!(menu instanceof HTMLElement) || menu.hidden) return;
     const target = event.target;
+    if (!(target instanceof Node)) return;
+
     if (
-      target instanceof Node &&
-      (menu.contains(target) || (btn instanceof HTMLElement && btn.contains(target)))
+      fileMenu instanceof HTMLElement &&
+      !fileMenu.hidden &&
+      !fileMenu.contains(target) &&
+      !(fileBtn instanceof HTMLElement && fileBtn.contains(target))
     ) {
+      toggleAppFileMenu(false);
       return;
     }
-    toggleUILayoutPresetMenu(false);
-  });
 
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
+    const btn = $("ui-layout-preset-btn");
+    if (
+      menu instanceof HTMLElement &&
+      !menu.hidden &&
+      !menu.contains(target) &&
+      !(btn instanceof HTMLElement && btn.contains(target))
+    ) {
       toggleUILayoutPresetMenu(false);
     }
   });
 
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      toggleAppFileMenu(false);
+    }
+  });
+
   refreshUILayoutPresetPicker();
-  syncUILayoutActionButtonWidths();
 
   const importInput = $("ui-layout-import-input");
   const importBtn = $("ui-layout-import-btn");
@@ -3251,6 +3319,7 @@ function setupUILayoutPersistence() {
         } catch (_err) {
           // still applied
         }
+        toggleAppFileMenu(false);
         logLine("INFO", "UI layout imported from file");
       } catch (_err) {
         logLine("ERROR", "Could not read layout file");
@@ -3270,12 +3339,13 @@ function setupUILayoutPersistence() {
       return;
     }
     resetUILayoutToBlankSlate();
+    toggleAppFileMenu(false);
     logLine("INFO", "UI reset to blank slate (all panels closed)");
   });
 
   window.addEventListener("resize", () => {
     positionUILayoutPresetMenu();
-    syncUILayoutActionButtonWidths();
+    document.querySelectorAll(".quick-panel").forEach((panel) => keepPanelBelowMenuBar(panel));
     if (window.innerWidth > 1100) scheduleSaveUILayout();
   });
 }
@@ -3296,7 +3366,7 @@ function placePanel(panel) {
   const idx = [...document.querySelectorAll(".quick-panel")].indexOf(panel);
   const offset = idx * 30;
   const right = 106 + offset;
-  const top = 106 + offset;
+  const top = clampPanelTop(106 + offset);
 
   panel.style.right = `${right}px`;
   panel.style.top = `${top}px`;
@@ -3323,7 +3393,7 @@ function setupDraggablePanel(panel, handle) {
     const rect = panel.getBoundingClientRect();
     panel.style.transform = "";
     panel.style.left = `${rect.left}px`;
-    panel.style.top = `${rect.top}px`;
+    panel.style.top = `${clampPanelTop(rect.top)}px`;
     panel.style.right = "auto";
     panel.style.bottom = "auto";
     panel.dataset.placed = "1";
@@ -3394,7 +3464,7 @@ function placeConsolePanel(panel, force = false) {
   const panelWidth = Math.min(980, Math.floor(window.innerWidth * 0.94 * 0.7));
   const panelHeight = Math.min(950, Math.floor(window.innerHeight * 0.88));
   const left = Math.max(12, Math.floor((window.innerWidth - panelWidth) / 2));
-  const top = Math.max(12, Math.floor((window.innerHeight - panelHeight) / 2));
+  const top = clampPanelTop(Math.max(12, Math.floor((window.innerHeight - panelHeight) / 2)));
 
   panel.style.left = `${left}px`;
   panel.style.top = `${top}px`;
@@ -3424,7 +3494,7 @@ function setupDraggableConsolePanel() {
     panel.style.transform = "";
     panel.style.position = "fixed";
     panel.style.left = `${rect.left}px`;
-    panel.style.top = `${rect.top}px`;
+    panel.style.top = `${clampPanelTop(rect.top)}px`;
     panel.style.right = "auto";
     panel.style.bottom = "auto";
     terminalPanelMoved = true;
