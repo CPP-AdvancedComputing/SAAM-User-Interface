@@ -1661,6 +1661,12 @@ const WALK_SEQUENCE_COLUMN_CONFIG = Object.freeze([
   { label: "H", valueIndex: 2 },
   { label: "Δ", valueIndex: 3 },
 ]);
+const WALK_SEQUENCE_VISIBLE_COLUMNS_BY_LEG = Object.freeze({
+  l0: [1],
+  l1: [0, 1, 2, 3],
+  l2: [0, 1, 2, 3],
+  l3: [0, 2, 3],
+});
 const WALK_SEQUENCE_DELTA_INDEX = 3;
 const LEGACY_WALK_SEQUENCE_VALUE_COUNT = 6;
 const DEFAULT_WALK_COUNT = 1;
@@ -1955,6 +1961,9 @@ function renderWalkSequenceTableEditor(sequenceOverride = null) {
   }
 
   CONFIG.legs.forEach((legId, legIndex) => {
+    const visibleColumns = WALK_SEQUENCE_COLUMN_CONFIG.filter(({ valueIndex }) =>
+      (WALK_SEQUENCE_VISIBLE_COLUMNS_BY_LEG[legId] || []).includes(valueIndex)
+    );
     const panel = document.createElement("section");
     panel.className = "cmd-walk-leg-panel";
     const legInputs = [];
@@ -1978,7 +1987,7 @@ function renderWalkSequenceTableEditor(sequenceOverride = null) {
     stepHeader.textContent = "Step";
     headerRow.appendChild(stepHeader);
 
-    WALK_SEQUENCE_COLUMN_CONFIG.forEach(({ label }) => {
+    visibleColumns.forEach(({ label }) => {
       const th = document.createElement("th");
       th.scope = "col";
       th.textContent = label;
@@ -1995,7 +2004,7 @@ function renderWalkSequenceTableEditor(sequenceOverride = null) {
       rowLabel.textContent = `Step ${stepIndex + 1}`;
       row.appendChild(rowLabel);
 
-      WALK_SEQUENCE_COLUMN_CONFIG.forEach(({ label, valueIndex }) => {
+      visibleColumns.forEach(({ label, valueIndex }) => {
         const cell = document.createElement("td");
         const isDeltaField = valueIndex === WALK_SEQUENCE_DELTA_INDEX;
         const input = document.createElement("input");
@@ -2331,10 +2340,6 @@ function appendWalkSequenceEditor(container) {
   const header = document.createElement("div");
   header.className = "cmd-inline-actions";
 
-  const lbl = document.createElement("label");
-  lbl.setAttribute("for", "cmd-f-walk-sequence");
-  lbl.textContent = "sequence";
-
   const actionGroup = document.createElement("div");
   actionGroup.className = "cmd-walk-preset-actions";
 
@@ -2362,7 +2367,6 @@ function appendWalkSequenceEditor(container) {
   resetBtn.addEventListener("click", resetWalkSequenceEditor);
 
   if (isPopout) {
-    header.appendChild(lbl);
     actionGroup.appendChild(saveBtn);
   }
   actionGroup.appendChild(loadBtn);
@@ -2475,8 +2479,8 @@ function appendWalkSequenceEditor(container) {
   presetMenu.appendChild(presetActions);
 
   if (isPopout) {
-    group.appendChild(header);
     group.appendChild(controls);
+    group.appendChild(header);
     group.appendChild(details);
     group.appendChild(status);
     container.appendChild(group);

@@ -1863,6 +1863,38 @@ button:disabled {
   min-width: 0;
 }
 
+body.commands-popout-mode .cmd-walk-options-row,
+body.commands-popout-mode .cmd-walk-sequence-controls {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+body.commands-popout-mode .cmd-walk-options-row > .field-group,
+body.commands-popout-mode .cmd-walk-step-count {
+  flex: 0 0 auto;
+  width: 100%;
+  max-width: 320px;
+  margin-bottom: 0;
+}
+
+body.commands-popout-mode .cmd-walk-step-count {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 4px;
+}
+
+body.commands-popout-mode .cmd-walk-step-count input,
+body.commands-popout-mode .cmd-walk-options-row #cmd-f-count,
+body.commands-popout-mode .cmd-walk-options-row #cmd-f-global-delta {
+  width: 5.85rem;
+  min-width: 5.85rem;
+  max-width: 5.85rem;
+}
+
 .cmd-walk-preset-delete-btn {
   width: 38px;
   min-width: 38px;
