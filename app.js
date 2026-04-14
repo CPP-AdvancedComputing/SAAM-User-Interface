@@ -120,6 +120,7 @@ let serviceSocketUrl = "";
 let terminalTabs = [];
 let activeTabIndex = 0;
 let terminalPanelMoved = false;
+let applyingUILayoutState = false;
 let deviceRefreshTimer = null;
 let deviceScanInFlight = false;
 let lastDeviceJson = "";
@@ -3208,25 +3209,39 @@ const UI_LAYOUT_STORAGE_KEY = "sam-ui-layout-v1";
 const UI_LAYOUT_PRESETS_STORAGE_KEY = "sam-ui-layout-presets-v1";
 let layoutSaveTimer = 0;
 
+function persistUILayoutNow() {
+  if (applyingUILayoutState) return;
+  clearTimeout(layoutSaveTimer);
+  layoutSaveTimer = 0;
+  try {
+    localStorage.setItem(UI_LAYOUT_STORAGE_KEY, JSON.stringify(buildUILayoutState()));
+  } catch (_err) {
+    // quota or private mode
+  }
+}
+
 function scheduleSaveUILayout() {
+  if (applyingUILayoutState) return;
   clearTimeout(layoutSaveTimer);
   layoutSaveTimer = window.setTimeout(() => {
-    try {
-      localStorage.setItem(UI_LAYOUT_STORAGE_KEY, JSON.stringify(buildUILayoutState()));
-    } catch (_err) {
-      // quota or private mode
-    }
+    persistUILayoutNow();
   }, 150);
 }
 
 /** @param {HTMLElement} panel */
 function snapshotPanelLayout(panel) {
+  const rect = panel.getBoundingClientRect();
+  const shouldUseViewportPosition =
+    panel.id === "terminal-panel" ||
+    panel.dataset.placed === "1" ||
+    !!panel.style.left ||
+    !!panel.style.top;
   return {
     hidden: panel.hidden,
-    left: panel.style.left || "",
-    top: panel.style.top || "",
-    right: panel.style.right || "",
-    bottom: panel.style.bottom || "",
+    left: shouldUseViewportPosition ? `${Math.round(rect.left)}px` : panel.style.left || "",
+    top: shouldUseViewportPosition ? `${Math.round(rect.top)}px` : panel.style.top || "",
+    right: shouldUseViewportPosition ? "auto" : panel.style.right || "",
+    bottom: shouldUseViewportPosition ? "auto" : panel.style.bottom || "",
     width: panel.style.width || "",
     height: panel.style.height || "",
     zIndex: panel.style.zIndex || "",
@@ -3283,10 +3298,15 @@ function clampPanelTop(topValue) {
 function keepPanelBelowMenuBar(panel) {
   if (!(panel instanceof HTMLElement) || panel.hidden) return;
   const rect = panel.getBoundingClientRect();
-  const clampedTop = clampPanelTop(rect.top);
-  if (clampedTop === Math.round(rect.top)) return;
+  const currentTopValue = Number.parseFloat(panel.style.top || "");
+  const currentTop = Number.isFinite(currentTopValue) ? currentTopValue : rect.top;
+  const clampedTop = clampPanelTop(currentTop);
+  if (clampedTop === Math.round(currentTop)) return;
+  const explicitLeft = typeof panel.style.left === "string" ? panel.style.left.trim() : "";
+  const nextLeft =
+    explicitLeft && explicitLeft !== "auto" ? explicitLeft : `${Math.round(rect.left)}px`;
   panel.style.transform = "";
-  panel.style.left = `${Math.round(rect.left)}px`;
+  panel.style.left = nextLeft;
   panel.style.top = `${clampedTop}px`;
   panel.style.right = "auto";
   panel.style.bottom = "auto";
@@ -3312,6 +3332,16 @@ function applyPanelSnapshotStyles(panel, snap) {
   else panel.style.zIndex = "";
   if (snap.placed) panel.dataset.placed = "1";
   else delete panel.dataset.placed;
+}
+
+/**
+ * @param {Partial<ReturnType<typeof snapshotPanelLayout>> | null | undefined} snap
+ */
+function snapshotHasExplicitPosition(snap) {
+  if (!snap || typeof snap !== "object") return false;
+  const hasLeft = typeof snap.left === "string" && snap.left.trim() !== "";
+  const hasTop = typeof snap.top === "string" && snap.top.trim() !== "";
+  return hasLeft || hasTop;
 }
 
 function syncLauncherButtonsToPanels() {
@@ -3346,34 +3376,46 @@ function isValidUILayoutState(raw) {
 function applyUILayoutState(state) {
   if (!isValidUILayoutState(state)) return false;
   const wide = window.innerWidth > 1100;
-  terminalPanelMoved = wide && !!state.terminalPanelMoved;
+  const terminalSnap =
+    state.panels && typeof state.panels === "object" ? state.panels["terminal-panel"] : null;
+  terminalPanelMoved =
+    !!state.terminalPanelMoved || snapshotHasExplicitPosition(terminalSnap);
 
-  for (const [id, snap] of Object.entries(state.panels)) {
-    const panel = $(id);
-    if (!(panel instanceof HTMLElement)) continue;
-    if (!snap || typeof snap !== "object") continue;
-    panel.hidden = !!snap.hidden;
-    if (wide) {
-      applyPanelSnapshotStyles(panel, snap);
-      keepPanelBelowMenuBar(panel);
+  applyingUILayoutState = true;
+  try {
+    for (const [id, snap] of Object.entries(state.panels)) {
+      const panel = $(id);
+      if (!(panel instanceof HTMLElement)) continue;
+      if (!snap || typeof snap !== "object") continue;
+      panel.hidden = !!snap.hidden;
+      const shouldApplySnapshot = wide || (id === "terminal-panel" && terminalPanelMoved);
+      if (shouldApplySnapshot) {
+        applyPanelSnapshotStyles(panel, snap);
+        if (id === "terminal-panel" && terminalPanelMoved) {
+          panel.dataset.placed = "1";
+        }
+        keepPanelBelowMenuBar(panel);
+      }
+      else clearPanelPositionStyles(panel);
     }
-    else clearPanelPositionStyles(panel);
-  }
 
-  const parallel = document.querySelector('input[name="robot-render-layout"][value="parallel"]');
-  const spread = document.querySelector('input[name="robot-render-layout"][value="spread"]');
-  const wantSpread = state.robotRenderLayout === "spread";
-  if (spread instanceof HTMLInputElement && parallel instanceof HTMLInputElement) {
-    const currentlySpread = spread.checked;
-    if (wantSpread !== currentlySpread) {
-      if (wantSpread) {
-        spread.checked = true;
-        spread.dispatchEvent(new Event("change", { bubbles: true }));
-      } else {
-        parallel.checked = true;
-        parallel.dispatchEvent(new Event("change", { bubbles: true }));
+    const parallel = document.querySelector('input[name="robot-render-layout"][value="parallel"]');
+    const spread = document.querySelector('input[name="robot-render-layout"][value="spread"]');
+    const wantSpread = state.robotRenderLayout === "spread";
+    if (spread instanceof HTMLInputElement && parallel instanceof HTMLInputElement) {
+      const currentlySpread = spread.checked;
+      if (wantSpread !== currentlySpread) {
+        if (wantSpread) {
+          spread.checked = true;
+          spread.dispatchEvent(new Event("change", { bubbles: true }));
+        } else {
+          parallel.checked = true;
+          parallel.dispatchEvent(new Event("change", { bubbles: true }));
+        }
       }
     }
+  } finally {
+    applyingUILayoutState = false;
   }
 
   syncLauncherButtonsToPanels();
@@ -3851,6 +3893,10 @@ function setupUILayoutPersistence() {
     document.querySelectorAll(".quick-panel").forEach((panel) => keepPanelBelowMenuBar(panel));
     if (window.innerWidth > 1100) scheduleSaveUILayout();
   });
+
+  window.addEventListener("pagehide", () => {
+    persistUILayoutNow();
+  });
 }
 
 function bringPanelToFront(panel) {
@@ -3883,6 +3929,8 @@ function setupDraggablePanel(panel, handle) {
   let dragging = false;
   let startMouseX = 0;
   let startMouseY = 0;
+  let startPanelLeft = 0;
+  let startPanelTop = 0;
   let dx = 0;
   let dy = 0;
   let rafId = 0;
@@ -3939,7 +3987,7 @@ function setupDraggablePanel(panel, handle) {
     }
     if (dx !== 0 || dy !== 0) {
       commitPosition();
-      scheduleSaveUILayout();
+      persistUILayoutNow();
     }
     try {
       handle.releasePointerCapture(e.pointerId);
@@ -3983,6 +4031,8 @@ function setupDraggableConsolePanel() {
   let dragging = false;
   let startMouseX = 0;
   let startMouseY = 0;
+  let startPanelLeft = 0;
+  let startPanelTop = 0;
   let dx = 0;
   let dy = 0;
   let rafId = 0;
@@ -3993,11 +4043,10 @@ function setupDraggableConsolePanel() {
   }
 
   function commitPosition() {
-    const rect = panel.getBoundingClientRect();
     panel.style.transform = "";
     panel.style.position = "fixed";
-    panel.style.left = `${rect.left}px`;
-    panel.style.top = `${clampPanelTop(rect.top)}px`;
+    panel.style.left = `${Math.round(startPanelLeft + dx)}px`;
+    panel.style.top = `${clampPanelTop(startPanelTop + dy)}px`;
     panel.style.right = "auto";
     panel.style.bottom = "auto";
     terminalPanelMoved = true;
@@ -4016,8 +4065,11 @@ function setupDraggableConsolePanel() {
     }
 
     bringPanelToFront(panel);
+    const rect = panel.getBoundingClientRect();
     startMouseX = e.clientX;
     startMouseY = e.clientY;
+    startPanelLeft = rect.left;
+    startPanelTop = rect.top;
     dx = 0;
     dy = 0;
 
@@ -4048,7 +4100,7 @@ function setupDraggableConsolePanel() {
     }
     if (dx !== 0 || dy !== 0) {
       commitPosition();
-      scheduleSaveUILayout();
+      persistUILayoutNow();
     }
     try {
       handle.releasePointerCapture(e.pointerId);
@@ -4931,6 +4983,7 @@ window.addEventListener("DOMContentLoaded", () => {
   // Make all panels with drag handles draggable
   document.querySelectorAll(".panel-drag-handle[data-drag-panel]").forEach((handle) => {
     const panel = $(handle.dataset.dragPanel);
+    if (panel?.id === "terminal-panel") return;
     if (panel) setupDraggablePanel(panel, handle);
   });
 
