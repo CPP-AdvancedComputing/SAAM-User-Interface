@@ -4921,6 +4921,10 @@ window.addEventListener("DOMContentLoaded", () => {
   if (gyroZeroRollPitchBtn) {
     gyroZeroRollPitchBtn.addEventListener("click", zeroImuRollPitchDisplay);
   }
+  const renderZeroBtn = $("robot-render-zero-btn");
+  if (renderZeroBtn) {
+    renderZeroBtn.addEventListener("click", zeroImuRollPitchDisplay);
+  }
   setupGyroPanel();
   setupInitialFocus();
 

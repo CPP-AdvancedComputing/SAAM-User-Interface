@@ -225,8 +225,10 @@ export function initRobotRenderUI({ panel, getPose }) {
   function syncFullscreenButtonState() {
     if (!fullscreenBtn) return;
     const isFs = document.fullscreenElement === panel;
-    fullscreenBtn.textContent = isFs ? "Exit fullscreen" : "Fullscreen";
+    fullscreenBtn.textContent = isFs ? "🗗" : "⛶";
     fullscreenBtn.setAttribute("aria-pressed", String(isFs));
+    fullscreenBtn.setAttribute("aria-label", isFs ? "Exit fullscreen" : "Enter fullscreen");
+    fullscreenBtn.title = isFs ? "Exit fullscreen" : "Enter fullscreen";
   }
 
   async function toggleFullscreen() {

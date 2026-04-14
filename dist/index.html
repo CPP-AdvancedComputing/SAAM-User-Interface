@@ -165,8 +165,8 @@
         }
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-BJDhDJ47.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-BxH_3d44.css">
+    <script type="module" crossorigin src="/assets/index-CNObrz_K.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DeYFkedf.css">
   </head>
   <body>
     <header class="app-header">
@@ -273,8 +273,13 @@
         </div>
       </div>
 
-      <div class="app-title-group">
-        <h1>S.A.A.M. Control Interface</h1>
+      <div class="app-title-group" aria-label="System identity">
+        <div class="app-title-mainline">
+          <span class="app-title-rail" aria-hidden="true"></span>
+          <h1>S.A.A.M.</h1>
+          <span class="app-title-rail" aria-hidden="true"></span>
+        </div>
+        <p class="app-title-subtitle">Operations Console</p>
       </div>
 
       <section class="connection-panel connection-corner" aria-label="Connection status">
@@ -843,14 +848,29 @@
           <div class="robot-render-toolbar-right">
             <button
               type="button"
+              id="robot-render-zero-btn"
+              class="robot-render-zero-btn"
+              title="Zero roll/pitch display"
+            >
+              Zero
+            </button>
+            <button
+              type="button"
               id="robot-render-fullscreen-btn"
               class="robot-render-fullscreen-btn"
               title="Toggle fullscreen (Esc to exit)"
+              aria-label="Enter fullscreen"
             >
-              Fullscreen
+              ⛶
             </button>
-            <button type="button" id="robot-render-close-btn" class="robot-render-close-btn">
-              Close
+            <button
+              type="button"
+              id="robot-render-close-btn"
+              class="robot-render-close-btn"
+              title="Close"
+              aria-label="Close"
+            >
+              ×
             </button>
           </div>
         </div>
