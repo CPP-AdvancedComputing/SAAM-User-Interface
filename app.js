@@ -26,7 +26,9 @@ const CONFIG = {
     webLogTopic: "/web/log",
   },
   terminal: {
-    gatewayUrl: "ws://10.12.64.222:8787",
+    // Default to this machine so `npm run terminal` matches without changing the Gateway dropdown.
+    // Override at build time: VITE_TERMINAL_GATEWAY_URL=ws://10.12.64.222:8787 npm run build
+    gatewayUrl: import.meta.env.VITE_TERMINAL_GATEWAY_URL || "ws://127.0.0.1:8787",
   },
   legs: ["l0", "l1", "l2", "l3"],
   joints: ["inner_stepper", "outer_stepper", "servo"],
@@ -570,9 +572,10 @@ function teardownListenRosTopic() {
 }
 
 function stopUdpListener(sendStop = true) {
-  if (sendStop && listenUdpPort != null && serviceSocket?.readyState === WebSocket.OPEN) {
+  const ws = pickReachableTerminalGatewayWebSocket();
+  if (sendStop && listenUdpPort != null && ws?.readyState === WebSocket.OPEN) {
     try {
-      serviceSocket.send(JSON.stringify({ type: "stop_udp_listen" }));
+      ws.send(JSON.stringify({ type: "stop_udp_listen" }));
     } catch (_err) {
       // ignore
     }
@@ -679,15 +682,20 @@ async function startUdpListener() {
 
   try {
     await connectServiceGateway(gatewayUrl);
-  } catch (err) {
+  } catch (_err) {
+    // Dedicated service socket may fail; SSH tab may still be connected to the same gateway.
+  }
+
+  const gatewayWs = pickReachableTerminalGatewayWebSocket();
+  if (!gatewayWs) {
     setListenStatus("Gateway unavailable", "error");
-    appendListenOutput(err.message || "Failed to connect to terminal gateway.");
+    appendListenOutput("Open a terminal gateway connection (Connect in Terminal) first.");
     return;
   }
 
   stopActiveListener({ keepStatus: true, sendUdpStop: false });
   try {
-    serviceSocket.send(
+    gatewayWs.send(
       JSON.stringify({
         type: "listen_udp",
         udp_port: port,
@@ -1725,40 +1733,100 @@ function loadStoredWalkSequenceText() {
 }
 
 function loadStoredWalkPresets() {
+  if (Array.isArray(remoteWalkPresets)) {
+    return remoteWalkPresets.map((entry) => ({ ...entry }));
+  }
+  return loadWalkPresetsFromLocalStorage();
+}
+
+function loadWalkPresetsFromLocalStorage() {
   try {
     const raw = localStorage.getItem(WALK_PRESETS_STORAGE_KEY);
     if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((entry) => entry && typeof entry === "object" && typeof entry.name === "string")
-      .map((entry) => {
-        const countValue = Number.parseInt(String(entry.count ?? DEFAULT_WALK_COUNT), 10);
-        const count =
-          Number.isFinite(countValue) && countValue >= 1
-            ? String(countValue)
-            : String(DEFAULT_WALK_COUNT);
-        const sequence = Array.isArray(entry.sequence)
-          ? normalizeWalkSequence(entry.sequence)
-          : DEFAULT_WALK_SEQUENCE;
-        return {
-          name: String(entry.name).trim(),
-          count,
-          sequence,
-          savedAt:
-            typeof entry.savedAt === "string" && entry.savedAt
-              ? entry.savedAt
-              : new Date().toISOString(),
-        };
-      })
-      .filter((entry) => entry.name);
+    return normalizeWalkPresetsArray(JSON.parse(raw));
   } catch (_err) {
     return [];
   }
 }
 
+function normalizeWalkPresetsArray(parsed) {
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .filter((entry) => entry && typeof entry === "object" && typeof entry.name === "string")
+    .map((entry) => {
+      const countValue = Number.parseInt(String(entry.count ?? DEFAULT_WALK_COUNT), 10);
+      const count =
+        Number.isFinite(countValue) && countValue >= 1
+          ? String(countValue)
+          : String(DEFAULT_WALK_COUNT);
+      const sequence = Array.isArray(entry.sequence)
+        ? normalizeWalkSequence(entry.sequence)
+        : DEFAULT_WALK_SEQUENCE;
+      return {
+        name: String(entry.name).trim(),
+        count,
+        sequence,
+        savedAt:
+          typeof entry.savedAt === "string" && entry.savedAt
+            ? entry.savedAt
+            : new Date().toISOString(),
+      };
+    })
+    .filter((entry) => entry.name);
+}
+
+/**
+ * The UI opens two WebSockets to the same gateway when both are used: a dedicated `serviceSocket`
+ * (layout, walk presets, UDP, scans) and per-tab `tab.ws` for SSH. If the service socket never
+ * connects, walk preset sync must use the terminal tab socket or nothing is written to disk.
+ */
+function pickReachableTerminalGatewayWebSocket() {
+  if (serviceSocket?.readyState === WebSocket.OPEN) return serviceSocket;
+  const want = typeof CONFIG.terminal?.gatewayUrl === "string" ? CONFIG.terminal.gatewayUrl.trim() : "";
+  for (const tab of terminalTabs) {
+    if (tab.ws?.readyState === WebSocket.OPEN && (!want || tab.gatewayUrl === want)) {
+      return tab.ws;
+    }
+  }
+  return null;
+}
+
+/** @returns {boolean} true if presets are already in sync with the gateway or were sent successfully */
+function syncWalkPresetsToGateway(presets) {
+  const normalized = normalizeWalkPresetsArray(presets);
+  const encoded = JSON.stringify(normalized);
+  if (encoded === remoteWalkPresetsSyncHash) return true;
+  const ws = pickReachableTerminalGatewayWebSocket();
+  if (!ws) return false;
+  try {
+    ws.send(JSON.stringify({ type: "set_walk_presets", presets: normalized }));
+    remoteWalkPresetsSyncHash = encoded;
+    remoteWalkPresets = normalized;
+    return true;
+  } catch (_err) {
+    return false;
+  }
+}
+
 function persistWalkPresets(presets) {
-  localStorage.setItem(WALK_PRESETS_STORAGE_KEY, JSON.stringify(presets));
+  const normalized = normalizeWalkPresetsArray(presets);
+  localStorage.setItem(WALK_PRESETS_STORAGE_KEY, JSON.stringify(normalized));
+  if (syncWalkPresetsToGateway(normalized)) return;
+  const url = typeof CONFIG.terminal?.gatewayUrl === "string" ? CONFIG.terminal.gatewayUrl.trim() : "";
+  if (!url) return;
+  connectServiceGateway(url)
+    .then(() => {
+      if (!syncWalkPresetsToGateway(normalized)) {
+        logLine(
+          "TERM",
+          "Walk presets are in the browser only; the gateway did not accept sync (check terminal-server).",
+          "error"
+        );
+      }
+    })
+    .catch(() => {
+      logLine("TERM", "Could not open the service channel to save walk presets to the repo file.", "error");
+    });
 }
 
 function persistWalkSequenceText(rawText) {
@@ -2089,16 +2157,26 @@ function buildCurrentWalkPresetState() {
 
 function applyWalkPresetState(state) {
   if (!state || typeof state !== "object") return false;
-  const countInput = $("cmd-f-count");
-  if (countInput instanceof HTMLInputElement) {
-    countInput.value = String(state.count ?? DEFAULT_WALK_COUNT);
-  }
+  const normalizedCountValue = Number.parseInt(String(state.count ?? DEFAULT_WALK_COUNT), 10);
+  const normalizedCount =
+    Number.isFinite(normalizedCountValue) && normalizedCountValue >= 1
+      ? String(normalizedCountValue)
+      : String(DEFAULT_WALK_COUNT);
+  let normalizedSequence;
   try {
-    syncWalkSequenceText(normalizeWalkSequence(state.sequence ?? DEFAULT_WALK_SEQUENCE));
-    return true;
+    normalizedSequence = normalizeWalkSequence(state.sequence ?? DEFAULT_WALK_SEQUENCE);
   } catch (_err) {
     return false;
   }
+
+  const countInput = $("cmd-f-count");
+  if (countInput instanceof HTMLInputElement) {
+    countInput.value = normalizedCount;
+  }
+  // Keep default/runtime count aligned so main panel and popout behave the same after load.
+  CMD_DEFAULTS.count = normalizedCount;
+  syncWalkSequenceText(normalizedSequence);
+  return true;
 }
 
 function refreshWalkPresetPicker() {
@@ -2144,14 +2222,24 @@ function bringWalkPresetMenuToFront() {
   const menu = $("cmd-walk-preset-menu");
   if (!(menu instanceof HTMLElement)) return;
   recomputePanelZCounterFromDom();
-  menu.style.zIndex = String(Math.max(panelZCounter + 2, 1002));
+  // Popout #commands-panel uses z-index 9999; menu must sit above it or it looks like Load does nothing.
+  menu.style.zIndex = String(Math.max(panelZCounter + 2, 10050));
+}
+
+function isWalkPresetAnchorVisible(button) {
+  if (!(button instanceof HTMLButtonElement)) return false;
+  if (button.hidden) return false;
+  if (button.getAttribute("aria-hidden") === "true") return false;
+  // Do not use `closest("[hidden]")`: popout mode keeps `hidden` on #commands-panel but
+  // overrides display via CSS, so the anchor would wrongly be treated as invisible.
+  return button.getClientRects().length > 0;
 }
 
 function getWalkPresetAnchorButton() {
   const presetBtn = $("cmd-walk-preset-btn");
-  if (presetBtn instanceof HTMLButtonElement) return presetBtn;
+  if (isWalkPresetAnchorVisible(presetBtn)) return presetBtn;
   const saveBtn = $("cmd-save-btn");
-  if (saveBtn instanceof HTMLButtonElement && saveBtn.textContent?.trim() === "Load") return saveBtn;
+  if (isWalkPresetAnchorVisible(saveBtn) && saveBtn.textContent?.trim() === "Load") return saveBtn;
   return null;
 }
 
@@ -2271,6 +2359,7 @@ function loadSelectedWalkPreset() {
   }
 
   rememberActiveWalkPreset(name, preset);
+  updateCmdPreview();
   toggleWalkPresetMenu(false);
   logLine("INFO", `Loaded walk preset "${name}"`);
 }
@@ -2339,6 +2428,10 @@ function setupWalkPresetMenuGlobalHandlers() {
 
 function appendWalkSequenceEditor(container) {
   const isPopout = isCommandsPopoutMode();
+  const existingMenu = $("cmd-walk-preset-menu");
+  if (existingMenu instanceof HTMLElement) {
+    existingMenu.remove();
+  }
   const group = document.createElement("div");
   group.className = "field-group field-group-wide";
 
@@ -2501,7 +2594,7 @@ function appendWalkSequenceEditor(container) {
 
   group.appendChild(textarea);
   container.appendChild(group);
-  container.appendChild(presetMenu);
+  document.body.appendChild(presetMenu);
 
   if (isPopout) {
     updateWalkSequenceStatus();
@@ -3208,16 +3301,23 @@ let panelZCounter = 26;
 const UI_LAYOUT_STORAGE_KEY = "sam-ui-layout-v1";
 const UI_LAYOUT_PRESETS_STORAGE_KEY = "sam-ui-layout-presets-v1";
 let layoutSaveTimer = 0;
+let waitingForRemoteUILayout = false;
+let remoteUILayoutRequestTimer = 0;
+let lastUILayoutSyncHash = "";
+let remoteWalkPresets = null;
+let remoteWalkPresetsSyncHash = "";
 
 function persistUILayoutNow() {
   if (applyingUILayoutState) return;
   clearTimeout(layoutSaveTimer);
   layoutSaveTimer = 0;
+  const state = buildUILayoutState();
   try {
-    localStorage.setItem(UI_LAYOUT_STORAGE_KEY, JSON.stringify(buildUILayoutState()));
+    localStorage.setItem(UI_LAYOUT_STORAGE_KEY, JSON.stringify(state));
   } catch (_err) {
     // quota or private mode
   }
+  syncUILayoutToGateway(state);
 }
 
 function scheduleSaveUILayout() {
@@ -3429,6 +3529,77 @@ function applyUILayoutState(state) {
     }, 50);
   }
   return true;
+}
+
+function parseLayoutTimestamp(value) {
+  const ts = Date.parse(typeof value === "string" ? value : "");
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function shouldApplyRemoteUILayoutState(remoteState) {
+  if (!isValidUILayoutState(remoteState)) return false;
+  let localState = null;
+  try {
+    const raw = localStorage.getItem(UI_LAYOUT_STORAGE_KEY);
+    localState = raw ? JSON.parse(raw) : null;
+  } catch (_err) {
+    localState = null;
+  }
+  if (!isValidUILayoutState(localState)) return true;
+  const remoteTs = parseLayoutTimestamp(remoteState.savedAt);
+  const localTs = parseLayoutTimestamp(localState.savedAt);
+  if (remoteTs && localTs) return remoteTs > localTs;
+  if (remoteTs) return true;
+  return false;
+}
+
+function syncUILayoutToGateway(state) {
+  const ws = pickReachableTerminalGatewayWebSocket();
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (waitingForRemoteUILayout) return;
+  if (!isValidUILayoutState(state)) return;
+  const encoded = JSON.stringify(state);
+  if (encoded === lastUILayoutSyncHash) return;
+  try {
+    ws.send(JSON.stringify({ type: "set_ui_layout", state }));
+    lastUILayoutSyncHash = encoded;
+  } catch (_err) {
+    // ignore socket errors; local storage remains authoritative fallback
+  }
+}
+
+function finishRemoteUILayoutHandshake() {
+  waitingForRemoteUILayout = false;
+  if (remoteUILayoutRequestTimer) {
+    clearTimeout(remoteUILayoutRequestTimer);
+    remoteUILayoutRequestTimer = 0;
+  }
+}
+
+function requestSharedUILayoutFromGateway() {
+  const ws = pickReachableTerminalGatewayWebSocket();
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  waitingForRemoteUILayout = true;
+  if (remoteUILayoutRequestTimer) clearTimeout(remoteUILayoutRequestTimer);
+  remoteUILayoutRequestTimer = window.setTimeout(() => {
+    waitingForRemoteUILayout = false;
+    remoteUILayoutRequestTimer = 0;
+  }, 2000);
+  try {
+    ws.send(JSON.stringify({ type: "get_ui_layout" }));
+  } catch (_err) {
+    finishRemoteUILayoutHandshake();
+  }
+}
+
+function requestWalkPresetsFromGateway() {
+  const ws = pickReachableTerminalGatewayWebSocket();
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify({ type: "get_walk_presets" }));
+  } catch (_err) {
+    // ignore and keep local fallback
+  }
 }
 
 function restoreUILayoutFromStorage() {
@@ -4346,9 +4517,17 @@ async function requestDeviceScan() {
 
   deviceScanInFlight = true;
   try {
-    await connectServiceGateway(gatewayUrl);
+    try {
+      await connectServiceGateway(gatewayUrl);
+    } catch (_err) {
+      // Same as walk presets: service socket optional if SSH tab is connected.
+    }
+    const ws = pickReachableTerminalGatewayWebSocket();
+    if (!ws) {
+      throw new Error("No gateway WebSocket (connect the terminal gateway first).");
+    }
     const knownIps = buildDefaultTrackedHotspotDevices().map((device) => device.ip).filter(Boolean);
-    serviceSocket.send(
+    ws.send(
       JSON.stringify({
         type: "scan_hotspot",
         host,
@@ -4363,6 +4542,105 @@ async function requestDeviceScan() {
     deviceScanInFlight = false;
     logLine("DEV", err.message || "Failed to request device scan", "error");
   }
+}
+
+/** @returns {boolean} true if this JSON message was handled as a gateway service reply (not SSH output) */
+function handleTerminalGatewayServiceMessage(payload) {
+  if (!payload || typeof payload.type !== "string") return false;
+  const t = payload.type;
+  if (t === "device_scan_result") {
+    latestTrackedHotspotDevices = payload.tracked_devices || payload.devices || [];
+    latestAllHotspotDevices = payload.all_devices || [];
+    renderDeviceStatuses();
+    deviceScanInFlight = false;
+    return true;
+  }
+  if (t === "ui_layout_state") {
+    finishRemoteUILayoutHandshake();
+    if (isValidUILayoutState(payload.state) && shouldApplyRemoteUILayoutState(payload.state)) {
+      applyUILayoutState(payload.state);
+      try {
+        localStorage.setItem(UI_LAYOUT_STORAGE_KEY, JSON.stringify(payload.state));
+      } catch (_err) {
+        // ignore; remote layout still applied in memory
+      }
+      lastUILayoutSyncHash = JSON.stringify(payload.state);
+      logLine("INFO", "Loaded shared UI layout from gateway");
+    } else if (!payload.found) {
+      syncUILayoutToGateway(buildUILayoutState());
+    }
+    return true;
+  }
+  if (t === "ui_layout_saved") {
+    finishRemoteUILayoutHandshake();
+    return true;
+  }
+  if (t === "ui_layout_error") {
+    finishRemoteUILayoutHandshake();
+    logLine("TERM", payload.message || "Shared UI layout sync failed", "error");
+    return true;
+  }
+  if (t === "walk_presets_state") {
+    const normalized = normalizeWalkPresetsArray(payload.presets || []);
+    if (normalized.length === 0) {
+      const localPresets = loadWalkPresetsFromLocalStorage();
+      if (localPresets.length > 0) {
+        remoteWalkPresets = localPresets;
+        syncWalkPresetsToGateway(localPresets);
+        refreshWalkPresetPicker();
+        return true;
+      }
+    }
+    remoteWalkPresets = normalized;
+    remoteWalkPresetsSyncHash = JSON.stringify(normalized);
+    try {
+      localStorage.setItem(WALK_PRESETS_STORAGE_KEY, remoteWalkPresetsSyncHash);
+    } catch (_err) {
+      // ignore; remote data still available while connected
+    }
+    refreshWalkPresetPicker();
+    return true;
+  }
+  if (t === "walk_presets_saved") {
+    return true;
+  }
+  if (t === "walk_presets_error") {
+    logLine("TERM", payload.message || "Walk preset sync failed", "error");
+    return true;
+  }
+  if (t === "device_scan_error") {
+    logLine("DEV", payload.message || "Device scan failed", "error");
+    deviceScanInFlight = false;
+    return true;
+  }
+  if (t === "udp_listener_started") {
+    listenUdpPort = Number.parseInt(payload.udp_port, 10) || listenUdpPort;
+    listenUdpBindIp = String(payload.bind_ip || listenUdpBindIp || "0.0.0.0");
+    setListenStatus(`Listening on ${listenUdpBindIp}:${listenUdpPort}`, "listening");
+    appendListenOutput(`UDP listener active on ${listenUdpBindIp}:${listenUdpPort}.`);
+    return true;
+  }
+  if (t === "udp_packet") {
+    const sourceIp = String(payload.source_ip || "unknown");
+    const sourcePort = String(payload.source_port || "?");
+    const data = String(payload.data || "");
+    appendListenOutput(`${sourceIp}:${sourcePort} ${data}`);
+    return true;
+  }
+  if (t === "udp_listener_stopped") {
+    const port = payload.udp_port ?? listenUdpPort ?? "?";
+    stopUdpListener(false);
+    setListenStatus("Idle");
+    appendListenOutput(`UDP listener stopped on port ${port}.`);
+    return true;
+  }
+  if (t === "udp_listener_error") {
+    stopUdpListener(false);
+    setListenStatus(payload.message || "UDP listener error", "error");
+    appendListenOutput(payload.message || "UDP listener error");
+    return true;
+  }
+  return false;
 }
 
 function connectServiceGateway(gatewayUrl) {
@@ -4390,6 +4668,8 @@ function connectServiceGateway(gatewayUrl) {
     serviceSocket.addEventListener("open", () => {
       updateTerminalStatusFromTabs();
       logLine("TERM", "Service gateway connected");
+      requestSharedUILayoutFromGateway();
+      requestWalkPresetsFromGateway();
       resolve();
     });
 
@@ -4398,6 +4678,9 @@ function connectServiceGateway(gatewayUrl) {
       stopUdpListener(false);
       serviceSocket = null;
       serviceSocketUrl = "";
+      remoteWalkPresets = null;
+      remoteWalkPresetsSyncHash = "";
+      finishRemoteUILayoutHandshake();
       updateTerminalStatusFromTabs();
       logLine("TERM", "Service gateway disconnected");
       if (hadUdpListener) {
@@ -4418,34 +4701,7 @@ function connectServiceGateway(gatewayUrl) {
       } catch (_err) {
         return;
       }
-      if (payload.type === "device_scan_result") {
-        latestTrackedHotspotDevices = payload.tracked_devices || payload.devices || [];
-        latestAllHotspotDevices = payload.all_devices || [];
-        renderDeviceStatuses();
-        deviceScanInFlight = false;
-      } else if (payload.type === "device_scan_error") {
-        logLine("DEV", payload.message || "Device scan failed", "error");
-        deviceScanInFlight = false;
-      } else if (payload.type === "udp_listener_started") {
-        listenUdpPort = Number.parseInt(payload.udp_port, 10) || listenUdpPort;
-        listenUdpBindIp = String(payload.bind_ip || listenUdpBindIp || "0.0.0.0");
-        setListenStatus(`Listening on ${listenUdpBindIp}:${listenUdpPort}`, "listening");
-        appendListenOutput(`UDP listener active on ${listenUdpBindIp}:${listenUdpPort}.`);
-      } else if (payload.type === "udp_packet") {
-        const sourceIp = String(payload.source_ip || "unknown");
-        const sourcePort = String(payload.source_port || "?");
-        const data = String(payload.data || "");
-        appendListenOutput(`${sourceIp}:${sourcePort} ${data}`);
-      } else if (payload.type === "udp_listener_stopped") {
-        const port = payload.udp_port ?? listenUdpPort ?? "?";
-        stopUdpListener(false);
-        setListenStatus("Idle");
-        appendListenOutput(`UDP listener stopped on port ${port}.`);
-      } else if (payload.type === "udp_listener_error") {
-        stopUdpListener(false);
-        setListenStatus(payload.message || "UDP listener error", "error");
-        appendListenOutput(payload.message || "UDP listener error");
-      }
+      handleTerminalGatewayServiceMessage(payload);
     });
   });
 }
@@ -4544,6 +4800,13 @@ function connectTabGateway(tab, gatewayUrl) {
 
     ws.addEventListener("open", () => {
       updateTerminalStatusFromTabs();
+      // SSH uses `tab.ws`; walk presets / layout sync also use `serviceSocket` when it connects.
+      // If the service socket never opens, sync still runs over this same WebSocket.
+      if (serviceSocket?.readyState !== WebSocket.OPEN) {
+        connectServiceGateway(gatewayUrl).catch(() => {});
+      }
+      requestSharedUILayoutFromGateway();
+      requestWalkPresetsFromGateway();
       resolve();
     });
 
@@ -4575,6 +4838,7 @@ function connectTabGateway(tab, gatewayUrl) {
         appendToTab(idx, String(event.data) + "\r\n");
         return;
       }
+      if (handleTerminalGatewayServiceMessage(payload)) return;
       if (payload.type === "output") {
         appendToTab(idx, payload.data || "");
       } else if (payload.type === "status") {
@@ -4824,6 +5088,14 @@ function setupTerminalForm() {
       }
       disconnectTerminalGatewaySockets();
       logLine("TERM", "Gateway: " + next);
+      connectServiceGateway(next).catch(() => {
+        // Optional sync channel; keep UI usable offline.
+      });
+    });
+  }
+  if (CONFIG.terminal.gatewayUrl) {
+    connectServiceGateway(CONFIG.terminal.gatewayUrl).catch(() => {
+      // Optional sync channel; keep UI usable offline.
     });
   }
   if (passwordInput && !passwordInput.value) {

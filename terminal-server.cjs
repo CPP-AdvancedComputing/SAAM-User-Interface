@@ -1,7 +1,21 @@
+const fs = require("fs");
+const path = require("path");
 const { WebSocketServer } = require("ws");
 const { Client } = require("ssh2");
 
 const PORT = Number(process.env.TERMINAL_GATEWAY_PORT || 8787);
+/**
+ * sudo reads passwords via open("/dev/tty"), not only isatty(stdin). Some SSH PTY sessions
+ * still fail that open while `tty` and `test -t 0` look fine. Wrapping in `script(1)` fixes it.
+ * Set SAM_SKIP_SCRIPT_WRAPPER=1 to disable (bsdutils / util-linux provides `script` on Jetson/Ubuntu).
+ */
+const SKIP_SCRIPT_WRAPPER = process.env.SAM_SKIP_SCRIPT_WRAPPER === "1";
+const UI_LAYOUT_STORE_PATH = process.env.SAM_UI_LAYOUT_STORE_PATH
+  ? path.resolve(process.env.SAM_UI_LAYOUT_STORE_PATH)
+  : path.resolve(__dirname, "sam-ui-layout-store.json");
+const WALK_PRESETS_STORE_PATH = process.env.SAM_WALK_PRESETS_STORE_PATH
+  ? path.resolve(process.env.SAM_WALK_PRESETS_STORE_PATH)
+  : path.resolve(__dirname, "sam-walk-presets-store.json");
 let nextCommandId = 1;
 
 // Persistent set of known hotspot IPs (survives across scans)
@@ -9,6 +23,83 @@ const knownHotspotIPs = new Set();
 
 // IPs to never show in device list
 const blockedIPs = new Set(["10.42.0.106"]);
+
+function isValidUILayoutState(raw) {
+  if (!raw || typeof raw !== "object") return false;
+  if (raw.version !== 1) return false;
+  if (!raw.panels || typeof raw.panels !== "object") return false;
+  return true;
+}
+
+function loadSharedUILayoutState() {
+  try {
+    if (!fs.existsSync(UI_LAYOUT_STORE_PATH)) return null;
+    const raw = fs.readFileSync(UI_LAYOUT_STORE_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!isValidUILayoutState(parsed)) return null;
+    return parsed;
+  } catch (_err) {
+    return null;
+  }
+}
+
+function persistSharedUILayoutState(state) {
+  if (!isValidUILayoutState(state)) return false;
+  try {
+    fs.mkdirSync(path.dirname(UI_LAYOUT_STORE_PATH), { recursive: true });
+    fs.writeFileSync(UI_LAYOUT_STORE_PATH, JSON.stringify(state), "utf8");
+    return true;
+  } catch (_err) {
+    return false;
+  }
+}
+
+let sharedUILayoutState = loadSharedUILayoutState();
+
+function isValidWalkPresetEntry(raw) {
+  if (!raw || typeof raw !== "object") return false;
+  if (typeof raw.name !== "string" || !raw.name.trim()) return false;
+  if (!Array.isArray(raw.sequence) || raw.sequence.length === 0) return false;
+  return true;
+}
+
+function normalizeWalkPresets(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(isValidWalkPresetEntry).map((entry) => ({
+    name: String(entry.name).trim(),
+    count: String(entry.count ?? "1"),
+    sequence: entry.sequence,
+    savedAt:
+      typeof entry.savedAt === "string" && entry.savedAt
+        ? entry.savedAt
+        : new Date().toISOString(),
+  }));
+}
+
+function loadSharedWalkPresets() {
+  try {
+    if (!fs.existsSync(WALK_PRESETS_STORE_PATH)) return [];
+    const raw = fs.readFileSync(WALK_PRESETS_STORE_PATH, "utf8");
+    return normalizeWalkPresets(JSON.parse(raw));
+  } catch (_err) {
+    return [];
+  }
+}
+
+function persistSharedWalkPresets(presets) {
+  const normalized = normalizeWalkPresets(presets);
+  try {
+    fs.mkdirSync(path.dirname(WALK_PRESETS_STORE_PATH), { recursive: true });
+    fs.writeFileSync(WALK_PRESETS_STORE_PATH, JSON.stringify(normalized), "utf8");
+    console.log(`[walk-presets] wrote ${WALK_PRESETS_STORE_PATH} (${normalized.length} preset(s))`);
+    return true;
+  } catch (err) {
+    console.error("[walk-presets] write failed:", err && err.message ? err.message : err);
+    return false;
+  }
+}
+
+let sharedWalkPresets = loadSharedWalkPresets();
 
 function stripAnsi(input) {
   return input
@@ -234,6 +325,12 @@ wss.on("connection", (ws) => {
                 message: `Shell connected to ${requestedKey}`,
               });
 
+              if (!SKIP_SCRIPT_WRAPPER) {
+                stream.write(
+                  "if command -v script >/dev/null 2>&1; then exec script -q -c bash /dev/null; fi\n"
+                );
+              }
+
               stream.write(
                 "stty sane 2>/dev/null; stty isig icanon echo 2>/dev/null; stty intr $'\\x03' 2>/dev/null; true\n"
               );
@@ -320,6 +417,66 @@ wss.on("connection", (ws) => {
     const username = String(message.username || "").trim();
     const password = String(message.password || "");
     const type = String(message.type || message.op || "").trim();
+
+    if (type === "get_ui_layout" || type === "ui_layout_get") {
+      send(ws, {
+        type: "ui_layout_state",
+        found: !!sharedUILayoutState,
+        state: sharedUILayoutState,
+      });
+      return;
+    }
+
+    if (type === "set_ui_layout" || type === "ui_layout_set") {
+      const state = message && typeof message === "object" ? message.state : null;
+      if (!isValidUILayoutState(state)) {
+        send(ws, {
+          type: "ui_layout_error",
+          message: "Invalid UI layout payload.",
+        });
+        return;
+      }
+      sharedUILayoutState = state;
+      const ok = persistSharedUILayoutState(sharedUILayoutState);
+      if (!ok) {
+        send(ws, {
+          type: "ui_layout_error",
+          message: "Failed to persist shared UI layout.",
+        });
+        return;
+      }
+      send(ws, {
+        type: "ui_layout_saved",
+        savedAt: typeof state.savedAt === "string" ? state.savedAt : "",
+      });
+      return;
+    }
+
+    if (type === "get_walk_presets" || type === "walk_presets_get") {
+      send(ws, {
+        type: "walk_presets_state",
+        presets: sharedWalkPresets,
+      });
+      return;
+    }
+
+    if (type === "set_walk_presets" || type === "walk_presets_set") {
+      const presets = normalizeWalkPresets(message && typeof message === "object" ? message.presets : []);
+      const ok = persistSharedWalkPresets(presets);
+      if (!ok) {
+        send(ws, {
+          type: "walk_presets_error",
+          message: "Failed to persist walk presets.",
+        });
+        return;
+      }
+      sharedWalkPresets = presets;
+      send(ws, {
+        type: "walk_presets_saved",
+        count: sharedWalkPresets.length,
+      });
+      return;
+    }
 
     if (type === "interrupt" || type === "send_interrupt" || type === "sigint") {
       if (session.shell && session.ready) {
