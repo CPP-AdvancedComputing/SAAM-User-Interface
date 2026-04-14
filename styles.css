@@ -1867,6 +1867,7 @@ body.commands-popout-mode .cmd-walk-options-row,
 body.commands-popout-mode .cmd-walk-sequence-controls {
   flex-direction: column;
   align-items: flex-start;
+  justify-content: flex-start;
   gap: 4px;
   margin-bottom: 4px;
 }
@@ -2072,6 +2073,20 @@ body.commands-popout-mode .cmd-walk-delta-input {
   max-width: 2.9rem;
 }
 
+body.commands-popout-mode #cmd-builder > .cmd-row > .field-group {
+  flex: 0 1 320px;
+  max-width: 320px;
+}
+
+body.commands-popout-mode .command-actions {
+  justify-content: center;
+}
+
+body.commands-popout-mode .command-actions #cmd-send-btn {
+  flex: 0 1 320px;
+  max-width: 320px;
+}
+
 .cmd-inline-status {
   min-height: 1.2em;
   font-size: 0.72rem;
@@ -2086,9 +2101,23 @@ body.commands-popout-mode .cmd-walk-delta-input {
   color: var(--danger);
 }
 
+.cmd-walk-loaded-label {
+  margin: 2px 0 8px;
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: #fff;
+  text-align: center;
+}
+
+.cmd-walk-loaded-label[data-state="modified"] {
+  color: #fff;
+}
+
 
 .command-actions {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 4px;
 }
@@ -2104,6 +2133,18 @@ body.commands-popout-mode .cmd-walk-delta-input {
 .command-actions #cmd-save-btn {
   background: rgba(15, 23, 42, 0.9);
   border-color: rgba(148, 163, 184, 0.5);
+}
+
+.cmd-loaded-walk-name {
+  flex: 1 1 100%;
+  min-height: 1.2em;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  text-align: right;
+}
+
+.cmd-loaded-walk-name[data-state="modified"] {
+  color: #fbbf24;
 }
 
 .cmd-saved {

@@ -2068,6 +2068,7 @@ function resetWalkSequenceEditor() {
   if (countInput instanceof HTMLInputElement) {
     countInput.value = String(DEFAULT_WALK_COUNT);
   }
+  clearActiveWalkPreset();
 }
 
 function buildCurrentWalkPresetState() {
@@ -2207,21 +2208,21 @@ function saveCurrentWalkPreset() {
     return;
   }
 
-  const suggestedName = `Walk ${new Date().toLocaleString()}`;
-  const rawName = window.prompt("Save current walk setup as preset:", suggestedName);
-  if (rawName == null) return;
-
-  const name = rawName.trim();
-  if (!name) {
-    logLine("ERROR", "Walk preset name cannot be empty");
-    return;
-  }
-
   const presets = loadStoredWalkPresets();
-  const existingIndex = presets.findIndex((preset) => preset.name === name);
-  if (existingIndex >= 0 && !window.confirm(`Overwrite the saved walk preset "${name}"?`)) {
-    return;
+  let name = activeWalkPresetName;
+
+  if (!name) {
+    const suggestedName = `Walk ${new Date().toLocaleString()}`;
+    const rawName = window.prompt("Save current walk setup as preset:", suggestedName);
+    if (rawName == null) return;
+    name = rawName.trim();
+    if (!name) {
+      logLine("ERROR", "Walk preset name cannot be empty");
+      return;
+    }
   }
+
+  const existingIndex = presets.findIndex((preset) => preset.name === name);
 
   const entry = {
     name,
@@ -2238,6 +2239,7 @@ function saveCurrentWalkPreset() {
     refreshWalkPresetPicker();
     const select = $("cmd-walk-preset-select");
     if (select instanceof HTMLSelectElement) select.value = name;
+    rememberActiveWalkPreset(name, state);
     positionWalkPresetMenu();
     logLine("INFO", `Walk preset saved locally as "${name}"`);
   } catch (_err) {
@@ -2267,6 +2269,7 @@ function loadSelectedWalkPreset() {
     return;
   }
 
+  rememberActiveWalkPreset(name, preset);
   toggleWalkPresetMenu(false);
   logLine("INFO", `Loaded walk preset "${name}"`);
 }
@@ -2296,6 +2299,7 @@ function deleteSelectedWalkPreset() {
     persistWalkPresets(nextPresets);
     refreshWalkPresetPicker();
     positionWalkPresetMenu();
+    if (activeWalkPresetName === name) clearActiveWalkPreset();
     logLine("INFO", `Deleted walk preset "${name}"`);
   } catch (_err) {
     logLine("ERROR", "Could not delete walk preset from browser storage");
@@ -2434,6 +2438,11 @@ function appendWalkSequenceEditor(container) {
   status.id = "cmd-walk-sequence-status";
   status.className = "cmd-inline-status";
 
+  const loadedLabel = document.createElement("div");
+  loadedLabel.id = "cmd-walk-loaded-label";
+  loadedLabel.className = "cmd-walk-loaded-label";
+  loadedLabel.hidden = true;
+
   const presetMenu = document.createElement("div");
   presetMenu.id = "cmd-walk-preset-menu";
   presetMenu.className = "cmd-walk-preset-menu";
@@ -2481,6 +2490,7 @@ function appendWalkSequenceEditor(container) {
   if (isPopout) {
     group.appendChild(controls);
     group.appendChild(header);
+    group.appendChild(loadedLabel);
     group.appendChild(details);
     group.appendChild(status);
     container.appendChild(group);
@@ -2633,6 +2643,7 @@ function buildCmdFields() {
 
   syncCommandActionButtons(type);
   updateCmdPreview();
+  updateLoadedWalkPresetIndicator();
 }
 
 function buildCmdPayload() {
@@ -2684,6 +2695,7 @@ function updateCmdPreview() {
   if ($("cmd-type")?.value === "walk") {
     updateWalkSequenceStatus();
   }
+  updateLoadedWalkPresetIndicator();
 }
 
 /** Saved command chips (Commands panel); persisted in localStorage. */
@@ -2807,6 +2819,65 @@ function installSavedCommandChip(name, cmdJsonStr, doPersist = true) {
 const cmdHistory = [];
 let cmdHistoryIdx = -1;
 let cmdHistoryDraft = "";
+
+function getWalkPresetSignature(state) {
+  if (!state || typeof state !== "object") return "";
+  try {
+    const normalized = {
+      count: String(state.count ?? DEFAULT_WALK_COUNT),
+      sequence: normalizeWalkSequence(state.sequence ?? DEFAULT_WALK_SEQUENCE),
+    };
+    return JSON.stringify(normalized);
+  } catch (_err) {
+    return "";
+  }
+}
+
+let activeWalkPresetName = "";
+let activeWalkPresetSignature = "";
+
+function rememberActiveWalkPreset(name, state) {
+  activeWalkPresetName = typeof name === "string" ? name.trim() : "";
+  activeWalkPresetSignature = getWalkPresetSignature(state);
+  updateLoadedWalkPresetIndicator();
+}
+
+function clearActiveWalkPreset() {
+  activeWalkPresetName = "";
+  activeWalkPresetSignature = "";
+  updateLoadedWalkPresetIndicator();
+}
+
+function updateLoadedWalkPresetIndicator() {
+  const el = $("cmd-loaded-walk-name");
+  const popoutEl = $("cmd-walk-loaded-label");
+  const isWalk = $("cmd-type")?.value === "walk";
+  const targets = [el, popoutEl].filter((node) => node instanceof HTMLElement);
+  if (targets.length === 0) return;
+
+  if (!isWalk || !activeWalkPresetName) {
+    targets.forEach((target) => {
+      target.hidden = true;
+      target.textContent = "";
+      target.removeAttribute("data-state");
+      target.removeAttribute("title");
+    });
+    return;
+  }
+
+  const currentSignature = getWalkPresetSignature(buildCurrentWalkPresetState());
+  const isModified = Boolean(activeWalkPresetSignature) && currentSignature !== activeWalkPresetSignature;
+  const label = isModified
+    ? `Loaded: ${activeWalkPresetName} (modified)`
+    : `Loaded: ${activeWalkPresetName}`;
+  targets.forEach((target) => {
+    target.hidden = false;
+    target.textContent = label;
+    target.title = activeWalkPresetName;
+    if (isModified) target.setAttribute("data-state", "modified");
+    else target.removeAttribute("data-state");
+  });
+}
 
 function publishPayload(dataStr) {
   console.log("[cmd send]", dataStr);
