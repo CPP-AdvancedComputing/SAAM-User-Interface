@@ -164,9 +164,9 @@
           });
         }
       })();
-    </script>
-    <script type="module" crossorigin src="/assets/index-CJQL5iAf.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-BMgSpMta.css">
+    </script>
+    <script type="module" crossorigin src="/assets/index-CDpvqGSJ.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-BWbV9OFI.css">
   </head>
   <body>
     <header class="app-header">
@@ -464,6 +464,102 @@
         </div>
       </section>
 
+      <section id="pico-deploy-panel" class="quick-panel pico-deploy-panel" aria-label="Pico firmware deploy" hidden>
+        <div class="panel-drag-handle pico-deploy-header" data-drag-panel="pico-deploy-panel">
+          <h2>Pico Deploy</h2>
+          <div class="pico-deploy-header-actions">
+            <div class="field-group pico-deploy-leg-group">
+              <label for="pico-deploy-leg">Leg</label>
+              <select id="pico-deploy-leg" aria-label="Select Pico leg">
+                <option value="l0">l0</option>
+                <option value="l1">l1</option>
+                <option value="l2">l2</option>
+                <option value="l3">l3</option>
+              </select>
+            </div>
+            <button
+              id="pico-deploy-settings-toggle-btn"
+              class="settings-cog-btn"
+              type="button"
+              aria-expanded="false"
+              aria-label="Toggle Pico deploy settings"
+              title="Pico deploy settings"
+            >
+              &#9881;
+            </button>
+          </div>
+        </div>
+
+        <div id="pico-deploy-settings" class="pico-deploy-settings" hidden>
+          <div class="pico-deploy-grid">
+            <div class="field-group">
+              <label for="pico-deploy-ip">Pico IP</label>
+              <input id="pico-deploy-ip" type="text" value="10.42.0.10" autocomplete="off" />
+            </div>
+            <div class="field-group">
+              <label for="pico-deploy-webrepl-port">WebREPL port</label>
+              <input id="pico-deploy-webrepl-port" type="text" value="8266" autocomplete="off" />
+            </div>
+            <div class="field-group">
+              <label for="pico-deploy-password">WebREPL password</label>
+              <input id="pico-deploy-password" type="password" autocomplete="current-password" />
+            </div>
+            <div class="field-group">
+              <label for="pico-deploy-local-path">Local firmware path</label>
+              <input
+                id="pico-deploy-local-path"
+                type="text"
+                value="/home/sam/ros2_ws/src/sam_leg/firmware/main.py"
+                autocomplete="off"
+              />
+            </div>
+          </div>
+          <div class="field-group">
+            <label for="pico-deploy-remote-path">Remote target path</label>
+            <input id="pico-deploy-remote-path" type="text" value="/main.py" autocomplete="off" />
+          </div>
+        </div>
+
+        <div class="pico-deploy-toolbar">
+          <span id="pico-deploy-status" class="pico-deploy-status" role="status" aria-live="polite">Idle</span>
+          <button id="pico-open-webrepl-btn" type="button">Open WebREPL</button>
+          <button id="pico-deploy-clear-log-btn" type="button">Clear Log</button>
+        </div>
+
+        <div class="pico-deploy-actions">
+          <button id="pico-deploy-load-pico-btn" type="button">Load From Pico</button>
+          <button id="pico-deploy-load-btn" type="button">Load File</button>
+          <button id="pico-deploy-save-btn" type="button">Save File</button>
+          <button id="pico-deploy-upload-btn" type="button">Upload</button>
+          <button id="pico-deploy-upload-reset-btn" type="button">Upload + Reset</button>
+          <button id="pico-deploy-reset-btn" type="button">Reset Only</button>
+        </div>
+
+        <p class="hint">
+          Load and edit the local <code>main.py</code> here, save it, then send it to the Pico over
+          WebREPL.
+        </p>
+
+        <div class="pico-deploy-editor-meta">
+          <span id="pico-deploy-editor-status" class="hint">Editor idle</span>
+        </div>
+
+        <textarea
+          id="pico-deploy-editor"
+          class="pico-deploy-editor"
+          spellcheck="false"
+          autocomplete="off"
+          aria-label="Pico firmware editor"
+        ></textarea>
+
+        <pre
+          id="pico-deploy-output"
+          class="trajectory-pre pico-deploy-output"
+          tabindex="0"
+          aria-label="Pico deploy log"
+        >—</pre>
+      </section>
+
       <section id="terminal-panel" class="quick-panel" hidden>
         <div
           id="terminal-drag-handle"
@@ -489,6 +585,7 @@
           <div class="field-group">
             <label for="terminal-gateway-select">Gateway</label>
             <select id="terminal-gateway-select" aria-label="Select terminal gateway">
+              <option value="ws://127.0.0.1:8787">127.0.0.1 (local gateway / npm run terminal)</option>
               <option value="ws://10.12.64.222:8787">10.12.64.222</option>
               <option value="ws://10.42.0.1:8787">10.42.0.1</option>
             </select>
@@ -890,6 +987,7 @@
       <aside class="panel-launcher" aria-label="Panel launcher">
         <button type="button" data-panel-target="commands-panel">Commands</button>
         <button type="button" data-panel-target="device-panel">Devices</button>
+        <button type="button" data-panel-target="pico-deploy-panel">Pico</button>
         <button type="button" data-panel-target="terminal-panel">Console</button>
         <button type="button" data-panel-target="robot-render-panel">Render</button>
         <button type="button" data-panel-target="testing-panel">Testing</button>

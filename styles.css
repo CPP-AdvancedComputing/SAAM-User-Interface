@@ -502,6 +502,7 @@ body:focus-visible {
 #gyro-panel,
 #terminal-panel,
 #device-panel,
+#pico-deploy-panel,
 #robot-render-panel {
   border-color: rgba(57, 231, 255, 0.72);
   background:
@@ -516,6 +517,7 @@ body:focus-visible {
 }
 
 .command-panel,
+.pico-deploy-panel,
 .testing-panel,
 .trajectory-panel,
 .gyro-panel,
@@ -545,6 +547,7 @@ body:focus-visible {
 }
 
 .command-panel > *,
+.pico-deploy-panel > *,
 .testing-panel > *,
 .trajectory-panel > *,
 .gyro-panel > *,
@@ -918,6 +921,14 @@ body:focus-visible {
 #listen-panel {
   width: min(760px, 84vw);
   min-width: min(460px, 94vw);
+  min-height: 280px;
+  max-height: calc(100vh - 100px);
+  overflow: auto;
+}
+
+#pico-deploy-panel {
+  width: min(620px, 92vw);
+  min-width: min(420px, 94vw);
   min-height: 280px;
   max-height: calc(100vh - 100px);
   overflow: auto;
@@ -1534,6 +1545,7 @@ body:focus-visible {
 }
 
 .command-panel,
+.pico-deploy-panel,
 .testing-panel,
 .trajectory-panel,
 .gyro-panel,
@@ -1548,6 +1560,7 @@ body:focus-visible {
 }
 
 .command-panel .hint,
+.pico-deploy-panel .hint,
 .testing-panel .hint,
 .trajectory-panel .hint,
 .gyro-panel .hint,
@@ -1767,6 +1780,7 @@ label {
 }
 
 input[type="text"],
+input[type="password"],
 textarea,
 select {
   background: rgba(15, 23, 42, 0.85);
@@ -1781,6 +1795,7 @@ select {
 }
 
 input[type="text"]:focus,
+input[type="password"]:focus,
 textarea:focus,
 select:focus {
   border-color: rgba(129, 140, 248, 1);
@@ -1885,6 +1900,115 @@ button:disabled {
 .cmd-inline-btn {
   padding: 4px 10px;
   font-size: 0.72rem;
+}
+
+.pico-deploy-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.pico-deploy-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pico-deploy-header-actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.pico-deploy-leg-group {
+  margin-bottom: 0;
+  min-width: 132px;
+}
+
+.pico-deploy-leg-group label {
+  margin-bottom: 2px;
+}
+
+.pico-deploy-leg-group select {
+  min-width: 132px;
+}
+
+.pico-deploy-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+#pico-deploy-settings[hidden] {
+  display: none !important;
+}
+
+.pico-deploy-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(71, 85, 105, 0.65);
+  background: rgba(15, 23, 42, 0.78);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.pico-deploy-status[data-state="working"] {
+  border-color: rgba(96, 165, 250, 0.7);
+  color: #dbeafe;
+}
+
+.pico-deploy-status[data-state="success"] {
+  border-color: rgba(74, 222, 128, 0.72);
+  color: #bbf7d0;
+}
+
+.pico-deploy-status[data-state="error"] {
+  border-color: rgba(248, 113, 113, 0.8);
+  color: #fecaca;
+}
+
+.pico-deploy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.pico-deploy-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 10px 0 8px;
+}
+
+.pico-deploy-editor-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 6px 0 8px;
+}
+
+.pico-deploy-editor {
+  min-height: 260px;
+  width: 100%;
+  margin-bottom: 10px;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.pico-deploy-output {
+  min-height: 180px;
+  max-height: 360px;
+  margin: 0;
+  font-size: 0.74rem;
 }
 
 body.commands-popout-mode .cmd-inline-btn {
@@ -2868,6 +2992,28 @@ body.commands-popout-mode .command-actions #cmd-send-btn {
 
   .jetson-metrics {
     grid-template-columns: 1fr;
+  }
+
+  .pico-deploy-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .pico-deploy-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pico-deploy-header-actions {
+    width: 100%;
+    align-items: stretch;
+  }
+
+  .pico-deploy-leg-group {
+    flex: 1 1 auto;
+  }
+
+  .pico-deploy-leg-group select {
+    width: 100%;
   }
 }
 

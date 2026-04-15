@@ -1,5 +1,7 @@
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
+const { spawn } = require("child_process");
 const { WebSocketServer } = require("ws");
 const { Client } = require("ssh2");
 
@@ -16,6 +18,7 @@ const UI_LAYOUT_STORE_PATH = process.env.SAM_UI_LAYOUT_STORE_PATH
 const WALK_PRESETS_STORE_PATH = process.env.SAM_WALK_PRESETS_STORE_PATH
   ? path.resolve(process.env.SAM_WALK_PRESETS_STORE_PATH)
   : path.resolve(__dirname, "sam-walk-presets-store.json");
+const PICO_WEBREPL_CLIENT_PATH = path.resolve(__dirname, "scripts", "pico_webrepl_client.py");
 let nextCommandId = 1;
 
 // Persistent set of known hotspot IPs (survives across scans)
@@ -403,6 +406,156 @@ wss.on("connection", (ws) => {
     });
   }
 
+  function streamChildOutput(child, ws, progressType) {
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+
+    function flushLines(kind) {
+      const source = kind === "stderr" ? stderrBuffer : stdoutBuffer;
+      const lines = source.split(/\r?\n/);
+      const keep = lines.pop() || "";
+      for (const line of lines) {
+        const text = line.trim();
+        if (!text) continue;
+        send(ws, { type: progressType, stream: kind, message: text });
+      }
+      if (kind === "stderr") stderrBuffer = keep;
+      else stdoutBuffer = keep;
+    }
+
+    child.stdout.on("data", (chunk) => {
+      stdoutBuffer += chunk.toString("utf8");
+      flushLines("stdout");
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderrBuffer += chunk.toString("utf8");
+      flushLines("stderr");
+    });
+
+    child.on("close", () => {
+      if (stdoutBuffer.trim()) {
+        send(ws, { type: progressType, stream: "stdout", message: stdoutBuffer.trim() });
+      }
+      if (stderrBuffer.trim()) {
+        send(ws, { type: progressType, stream: "stderr", message: stderrBuffer.trim() });
+      }
+    });
+  }
+
+  function runPicoWebreplCommand({
+    ws,
+    action,
+    host,
+    webreplPort,
+    webreplPassword,
+    localPath,
+    remotePath,
+    resetAfter,
+    onSuccess,
+  }) {
+    if (!fs.existsSync(PICO_WEBREPL_CLIENT_PATH)) {
+      send(ws, {
+        type: "pico_deploy_error",
+        action,
+        message: `Missing WebREPL helper script: ${PICO_WEBREPL_CLIENT_PATH}`,
+      });
+      return;
+    }
+
+    const args =
+      action === "reset"
+        ? [
+            PICO_WEBREPL_CLIENT_PATH,
+            "reset",
+            "--host",
+            host,
+            "--port",
+            String(webreplPort),
+            "--password",
+            webreplPassword,
+          ]
+        : action === "download"
+        ? [
+            PICO_WEBREPL_CLIENT_PATH,
+            "get",
+            "--host",
+            host,
+            "--port",
+            String(webreplPort),
+            "--password",
+            webreplPassword,
+            "--src",
+            remotePath,
+            "--dst",
+            localPath,
+          ]
+        : [
+            PICO_WEBREPL_CLIENT_PATH,
+            "put",
+            "--host",
+            host,
+            "--port",
+            String(webreplPort),
+            "--password",
+            webreplPassword,
+            "--src",
+            localPath,
+            "--dst",
+            remotePath,
+            ...(resetAfter ? ["--reset-after"] : []),
+          ];
+
+    send(ws, {
+      type: "pico_deploy_started",
+      action,
+      host,
+      webrepl_port: webreplPort,
+      local_path: localPath || "",
+      remote_path: remotePath || "",
+    });
+
+    const child = spawn("python3", args, {
+      cwd: __dirname,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    streamChildOutput(child, ws, "pico_deploy_progress");
+
+    child.on("error", (err) => {
+      send(ws, {
+        type: "pico_deploy_error",
+        action,
+        message: `Failed to start Pico deploy helper: ${err.message}`,
+      });
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        send(ws, {
+          type: "pico_deploy_complete",
+          action,
+          host,
+          webrepl_port: webreplPort,
+          remote_path: remotePath || "",
+        });
+        if (typeof onSuccess === "function") {
+          try {
+            onSuccess();
+          } catch (_err) {
+            // ignore callback failures after success response
+          }
+        }
+      } else {
+        send(ws, {
+          type: "pico_deploy_error",
+          action,
+          message: `${action} failed with exit code ${code}`,
+        });
+      }
+    });
+  }
+
   ws.on("message", (raw) => {
     let message;
     try {
@@ -474,6 +627,197 @@ wss.on("connection", (ws) => {
       send(ws, {
         type: "walk_presets_saved",
         count: sharedWalkPresets.length,
+      });
+      return;
+    }
+
+    if (type === "pico_file_read") {
+      const rawLocalPath = String(message.local_path || "").trim();
+      const localPath = rawLocalPath ? path.resolve(rawLocalPath) : "";
+      if (!rawLocalPath) {
+        send(ws, { type: "pico_file_error", action: "read", message: "local_path is required." });
+        return;
+      }
+      try {
+        const content = fs.readFileSync(localPath, "utf8");
+        send(ws, {
+          type: "pico_file_loaded",
+          local_path: localPath,
+          content,
+        });
+      } catch (err) {
+        send(ws, {
+          type: "pico_file_error",
+          action: "read",
+          message: `Failed to read file: ${err.message}`,
+        });
+      }
+      return;
+    }
+
+    if (type === "pico_file_write") {
+      const rawLocalPath = String(message.local_path || "").trim();
+      const localPath = rawLocalPath ? path.resolve(rawLocalPath) : "";
+      const content = typeof message.content === "string" ? message.content : "";
+      if (!rawLocalPath) {
+        send(ws, { type: "pico_file_error", action: "write", message: "local_path is required." });
+        return;
+      }
+      try {
+        fs.mkdirSync(path.dirname(localPath), { recursive: true });
+        fs.writeFileSync(localPath, content, "utf8");
+        send(ws, {
+          type: "pico_file_saved",
+          local_path: localPath,
+          bytes: Buffer.byteLength(content, "utf8"),
+        });
+      } catch (err) {
+        send(ws, {
+          type: "pico_file_error",
+          action: "write",
+          message: `Failed to save file: ${err.message}`,
+        });
+      }
+      return;
+    }
+
+    if (type === "pico_deploy" || type === "pico_upload" || type === "upload_pico_firmware") {
+      const picoHost = String(message.pico_ip || message.ip || "").trim();
+      const webreplPort = Number.parseInt(message.webrepl_port || 8266, 10);
+      const webreplPassword = String(message.webrepl_password || "").trim();
+      const rawLocalPath = String(message.local_path || "").trim();
+      const localPath = rawLocalPath ? path.resolve(rawLocalPath) : "";
+      const remotePath = String(message.remote_path || "/main.py").trim() || "/main.py";
+      const resetAfter = !!message.reset_after;
+
+      if (!picoHost || !webreplPassword || !rawLocalPath) {
+        send(ws, {
+          type: "pico_deploy_error",
+          action: "upload",
+          message: "pico_ip, webrepl_password, and local_path are required.",
+        });
+        return;
+      }
+      if (!Number.isFinite(webreplPort) || webreplPort < 1 || webreplPort > 65535) {
+        send(ws, {
+          type: "pico_deploy_error",
+          action: "upload",
+          message: "webrepl_port must be a valid TCP port.",
+        });
+        return;
+      }
+      if (!fs.existsSync(localPath) || !fs.statSync(localPath).isFile()) {
+        send(ws, {
+          type: "pico_deploy_error",
+          action: "upload",
+          message: `local_path is not a readable file: ${localPath}`,
+        });
+        return;
+      }
+
+      runPicoWebreplCommand({
+        ws,
+        action: "upload",
+        host: picoHost,
+        webreplPort,
+        webreplPassword,
+        localPath,
+        remotePath,
+        resetAfter,
+      });
+      return;
+    }
+
+    if (type === "pico_reset" || type === "reset_pico") {
+      const picoHost = String(message.pico_ip || message.ip || "").trim();
+      const webreplPort = Number.parseInt(message.webrepl_port || 8266, 10);
+      const webreplPassword = String(message.webrepl_password || "").trim();
+
+      if (!picoHost || !webreplPassword) {
+        send(ws, {
+          type: "pico_deploy_error",
+          action: "reset",
+          message: "pico_ip and webrepl_password are required.",
+        });
+        return;
+      }
+      if (!Number.isFinite(webreplPort) || webreplPort < 1 || webreplPort > 65535) {
+        send(ws, {
+          type: "pico_deploy_error",
+          action: "reset",
+          message: "webrepl_port must be a valid TCP port.",
+        });
+        return;
+      }
+
+      runPicoWebreplCommand({
+        ws,
+        action: "reset",
+        host: picoHost,
+        webreplPort,
+        webreplPassword,
+      });
+      return;
+    }
+
+    if (type === "pico_file_pull" || type === "pico_pull_file") {
+      const picoHost = String(message.pico_ip || message.ip || "").trim();
+      const webreplPort = Number.parseInt(message.webrepl_port || 8266, 10);
+      const webreplPassword = String(message.webrepl_password || "").trim();
+      const remotePath = String(message.remote_path || "/main.py").trim() || "/main.py";
+
+      if (!picoHost || !webreplPassword) {
+        send(ws, {
+          type: "pico_file_error",
+          action: "pull",
+          message: "pico_ip and webrepl_password are required.",
+        });
+        return;
+      }
+      if (!Number.isFinite(webreplPort) || webreplPort < 1 || webreplPort > 65535) {
+        send(ws, {
+          type: "pico_file_error",
+          action: "pull",
+          message: "webrepl_port must be a valid TCP port.",
+        });
+        return;
+      }
+
+      const tempPath = path.join(
+        os.tmpdir(),
+        `sam-pico-pull-${Date.now()}-${Math.random().toString(16).slice(2)}.py`
+      );
+      runPicoWebreplCommand({
+        ws,
+        action: "download",
+        host: picoHost,
+        webreplPort,
+        webreplPassword,
+        localPath: tempPath,
+        remotePath,
+        onSuccess: () => {
+          try {
+            const content = fs.readFileSync(tempPath, "utf8");
+            send(ws, {
+              type: "pico_file_pulled",
+              remote_path: remotePath,
+              content,
+              pico_ip: picoHost,
+            });
+          } catch (err) {
+            send(ws, {
+              type: "pico_file_error",
+              action: "pull",
+              message: `Failed to read pulled Pico file: ${err.message}`,
+            });
+          } finally {
+            try {
+              fs.unlinkSync(tempPath);
+            } catch (_err) {
+              // ignore
+            }
+          }
+        },
       });
       return;
     }

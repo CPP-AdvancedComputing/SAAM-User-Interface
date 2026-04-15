@@ -34,8 +34,13 @@ const CONFIG = {
   joints: ["inner_stepper", "outer_stepper", "servo"],
 };
 const DEFAULT_TERMINAL_PASSWORD = import.meta.env.VITE_TERMINAL_PASSWORD || "";
+const DEFAULT_PICO_WEBREPL_PASSWORD =
+  import.meta.env.VITE_PICO_WEBREPL_PASSWORD || DEFAULT_TERMINAL_PASSWORD;
 const ROS_BRIDGE_URL_STORAGE_KEY = "sam-ui-ros-bridge-url-v1";
 const TERMINAL_GATEWAY_URL_STORAGE_KEY = "sam-ui-terminal-gateway-url-v1";
+const DEFAULT_PICO_WEBREPL_PORT = 8266;
+const DEFAULT_PICO_FIRMWARE_PATH = "/home/sam/ros2_ws/src/sam_leg/firmware/main.py";
+const MAX_PICO_DEPLOY_LINES = 300;
 
 /** Per-leg IMU topic paths (filtered IMU, String summary, debug raw). */
 const legImuTopics = {
@@ -127,6 +132,8 @@ let deviceRefreshTimer = null;
 let deviceScanInFlight = false;
 let lastDeviceJson = "";
 let activeDeviceTab = "legs";
+const picoDeployLines = [];
+let picoDeployEditorDirty = false;
 const HOTSPOT_LEG_IP_HINTS_STORAGE_KEY = "sam-ui-hotspot-leg-ip-hints-v1";
 
 /** Default per-leg hotspot IPs before the UI has learned a live DHCP lease. */
@@ -4423,6 +4430,7 @@ function renderDeviceStatuses() {
   if (countEl) {
     countEl.textContent = `${connectedCount} connected, ${list.length} total`;
   }
+  syncPicoDeployLegSelection(false);
 }
 
 function disconnectTerminalGatewaySockets() {
@@ -4544,6 +4552,328 @@ async function requestDeviceScan() {
   }
 }
 
+function renderPicoDeployOutput() {
+  const output = $("pico-deploy-output");
+  if (!output) return;
+  output.textContent = picoDeployLines.length > 0 ? picoDeployLines.join("\n") : "\u2014";
+  output.scrollTop = output.scrollHeight;
+}
+
+function appendPicoDeployOutput(line) {
+  const text = String(line || "").trim();
+  if (!text) return;
+  picoDeployLines.push(`[${nowTime()}] ${text}`);
+  if (picoDeployLines.length > MAX_PICO_DEPLOY_LINES) {
+    picoDeployLines.splice(0, picoDeployLines.length - MAX_PICO_DEPLOY_LINES);
+  }
+  renderPicoDeployOutput();
+}
+
+function clearPicoDeployOutput() {
+  picoDeployLines.length = 0;
+  renderPicoDeployOutput();
+}
+
+function setPicoDeployStatus(text, state = "idle") {
+  const el = $("pico-deploy-status");
+  if (!el) return;
+  el.textContent = String(text || "Idle");
+  if (state) el.dataset.state = state;
+  else delete el.dataset.state;
+}
+
+function setPicoDeployEditorStatus(text) {
+  const el = $("pico-deploy-editor-status");
+  if (!el) return;
+  el.textContent = String(text || "Editor idle");
+}
+
+function markPicoDeployEditorDirty(isDirty) {
+  picoDeployEditorDirty = !!isDirty;
+  setPicoDeployEditorStatus(isDirty ? "Editor has unsaved changes" : "Editor synced to local file");
+}
+
+function getPicoDeploySuggestedIp(legId) {
+  const normalizedLeg = CONFIG.legs.includes(legId) ? legId : "l0";
+  return learnedHotspotLegIps[normalizedLeg] || getTrackedLegHotspotIp(normalizedLeg) || "";
+}
+
+function syncPicoDeployLegSelection(force = false) {
+  const legSelect = $("pico-deploy-leg");
+  const ipInput = $("pico-deploy-ip");
+  if (!(legSelect instanceof HTMLSelectElement) || !(ipInput instanceof HTMLInputElement)) return;
+  const suggestedIp = getPicoDeploySuggestedIp(legSelect.value);
+  if (force || !normalizeHotspotIp(ipInput.value)) {
+    ipInput.value = suggestedIp;
+    return;
+  }
+  const currentIp = normalizeHotspotIp(ipInput.value);
+  const matchesKnown = CONFIG.legs.some((leg) => currentIp === getPicoDeploySuggestedIp(leg));
+  if (matchesKnown) {
+    ipInput.value = suggestedIp;
+  }
+}
+
+async function loadPicoDeployFile() {
+  const localPath = String($("pico-deploy-local-path")?.value || "").trim();
+  const { gatewayUrl } = getTerminalConnectionConfig();
+  if (!gatewayUrl) {
+    setPicoDeployStatus("Gateway missing", "error");
+    appendPicoDeployOutput("Configure the terminal gateway before loading a local firmware file.");
+    return;
+  }
+  if (!localPath) {
+    setPicoDeployStatus("Path required", "error");
+    appendPicoDeployOutput("Enter a local firmware path to load.");
+    return;
+  }
+  setPicoDeployStatus("Loading file", "working");
+  appendPicoDeployOutput(`Loading local file ${localPath}.`);
+  try {
+    await connectServiceGateway(gatewayUrl);
+  } catch (err) {
+    setPicoDeployStatus("Gateway unavailable", "error");
+    appendPicoDeployOutput(err.message || "Failed to connect to terminal gateway.");
+    return;
+  }
+  const ws = pickReachableTerminalGatewayWebSocket();
+  if (!ws) {
+    setPicoDeployStatus("Gateway unavailable", "error");
+    appendPicoDeployOutput("No gateway WebSocket is available for file load.");
+    return;
+  }
+  ws.send(JSON.stringify({ type: "pico_file_read", local_path: localPath }));
+}
+
+async function savePicoDeployFile() {
+  const localPath = String($("pico-deploy-local-path")?.value || "").trim();
+  const editor = $("pico-deploy-editor");
+  const { gatewayUrl } = getTerminalConnectionConfig();
+  if (!(editor instanceof HTMLTextAreaElement)) return true;
+  if (!gatewayUrl) {
+    setPicoDeployStatus("Gateway missing", "error");
+    appendPicoDeployOutput("Configure the terminal gateway before saving the local firmware file.");
+    return false;
+  }
+  if (!localPath) {
+    setPicoDeployStatus("Path required", "error");
+    appendPicoDeployOutput("Enter a local firmware path to save.");
+    return false;
+  }
+  setPicoDeployStatus("Saving file", "working");
+  appendPicoDeployOutput(`Saving editor buffer to ${localPath}.`);
+  try {
+    await connectServiceGateway(gatewayUrl);
+  } catch (err) {
+    setPicoDeployStatus("Gateway unavailable", "error");
+    appendPicoDeployOutput(err.message || "Failed to connect to terminal gateway.");
+    return false;
+  }
+  const ws = pickReachableTerminalGatewayWebSocket();
+  if (!ws) {
+    setPicoDeployStatus("Gateway unavailable", "error");
+    appendPicoDeployOutput("No gateway WebSocket is available for file save.");
+    return false;
+  }
+  ws.send(
+    JSON.stringify({
+      type: "pico_file_write",
+      local_path: localPath,
+      content: editor.value,
+    })
+  );
+  return true;
+}
+
+async function loadPicoDeployFromPico() {
+  const picoIp = normalizeHotspotIp($("pico-deploy-ip")?.value || "");
+  const portText = String($("pico-deploy-webrepl-port")?.value || "").trim();
+  const webreplPort = Number.parseInt(portText, 10);
+  const webreplPassword = String($("pico-deploy-password")?.value || "");
+  const remotePath = String($("pico-deploy-remote-path")?.value || "").trim() || "/main.py";
+  const { gatewayUrl } = getTerminalConnectionConfig();
+
+  if (!gatewayUrl) {
+    setPicoDeployStatus("Gateway missing", "error");
+    appendPicoDeployOutput("Configure the terminal gateway before loading a file from the Pico.");
+    return;
+  }
+  if (!picoIp) {
+    setPicoDeployStatus("Invalid Pico IP", "error");
+    appendPicoDeployOutput("Enter a valid Pico hotspot IP.");
+    return;
+  }
+  if (!Number.isInteger(webreplPort) || webreplPort < 1 || webreplPort > 65535) {
+    setPicoDeployStatus("Invalid port", "error");
+    appendPicoDeployOutput("Enter a valid WebREPL TCP port.");
+    return;
+  }
+  if (!webreplPassword) {
+    setPicoDeployStatus("Password required", "error");
+    appendPicoDeployOutput("Enter the Pico WebREPL password before loading from the Pico.");
+    return;
+  }
+
+  setPicoDeployStatus("Loading from Pico", "working");
+  appendPicoDeployOutput(`Loading ${remotePath} from Pico ${picoIp}:${webreplPort}.`);
+  try {
+    await connectServiceGateway(gatewayUrl);
+  } catch (err) {
+    setPicoDeployStatus("Gateway unavailable", "error");
+    appendPicoDeployOutput(err.message || "Failed to connect to terminal gateway.");
+    return;
+  }
+  const ws = pickReachableTerminalGatewayWebSocket();
+  if (!ws) {
+    setPicoDeployStatus("Gateway unavailable", "error");
+    appendPicoDeployOutput("No gateway WebSocket is available for Pico file load.");
+    return;
+  }
+  ws.send(
+    JSON.stringify({
+      type: "pico_file_pull",
+      pico_ip: picoIp,
+      webrepl_port: webreplPort,
+      webrepl_password: webreplPassword,
+      remote_path: remotePath,
+    })
+  );
+}
+
+async function requestPicoDeploy(options = {}) {
+  const resetAfter = !!options.resetAfter;
+  const leg = String($("pico-deploy-leg")?.value || "l0").trim().toLowerCase();
+  const picoIp = normalizeHotspotIp($("pico-deploy-ip")?.value || "");
+  const portText = String($("pico-deploy-webrepl-port")?.value || "").trim();
+  const webreplPort = Number.parseInt(portText, 10);
+  const webreplPassword = String($("pico-deploy-password")?.value || "");
+  const localPath = String($("pico-deploy-local-path")?.value || "").trim();
+  const remotePath = String($("pico-deploy-remote-path")?.value || "").trim() || "/main.py";
+  const { gatewayUrl } = getTerminalConnectionConfig();
+
+  if (!gatewayUrl) {
+    setPicoDeployStatus("Gateway missing", "error");
+    appendPicoDeployOutput("Configure the terminal gateway before deploying Pico firmware.");
+    return;
+  }
+  if (!picoIp) {
+    setPicoDeployStatus("Invalid Pico IP", "error");
+    appendPicoDeployOutput("Enter a valid Pico hotspot IP.");
+    return;
+  }
+  if (!Number.isInteger(webreplPort) || webreplPort < 1 || webreplPort > 65535) {
+    setPicoDeployStatus("Invalid port", "error");
+    appendPicoDeployOutput("Enter a valid WebREPL TCP port.");
+    return;
+  }
+  if (!webreplPassword) {
+    setPicoDeployStatus("Password required", "error");
+    appendPicoDeployOutput("Enter the Pico WebREPL password before uploading.");
+    return;
+  }
+  if (!localPath) {
+    setPicoDeployStatus("Firmware path required", "error");
+    appendPicoDeployOutput("Enter the local firmware path to upload.");
+    return;
+  }
+  const editor = $("pico-deploy-editor");
+  if (editor instanceof HTMLTextAreaElement && picoDeployEditorDirty) {
+    const queued = await savePicoDeployFile();
+    if (!queued) return;
+  }
+
+  setPicoDeployStatus(resetAfter ? `Uploading ${leg} + reset` : `Uploading ${leg}`, "working");
+  appendPicoDeployOutput(
+    `${resetAfter ? "Upload + reset" : "Upload"} requested for ${leg} at ${picoIp}:${webreplPort}.`
+  );
+
+  try {
+    await connectServiceGateway(gatewayUrl);
+  } catch (err) {
+    setPicoDeployStatus("Gateway unavailable", "error");
+    appendPicoDeployOutput(err.message || "Failed to connect to terminal gateway.");
+    return;
+  }
+
+  const ws = pickReachableTerminalGatewayWebSocket();
+  if (!ws) {
+    setPicoDeployStatus("Gateway unavailable", "error");
+    appendPicoDeployOutput("No gateway WebSocket is available for Pico deploy.");
+    return;
+  }
+
+  ws.send(
+    JSON.stringify({
+      type: "pico_deploy",
+      leg,
+      pico_ip: picoIp,
+      webrepl_port: webreplPort,
+      webrepl_password: webreplPassword,
+      local_path: localPath,
+      remote_path: remotePath,
+      reset_after: resetAfter,
+    })
+  );
+}
+
+async function requestPicoReset() {
+  const leg = String($("pico-deploy-leg")?.value || "l0").trim().toLowerCase();
+  const picoIp = normalizeHotspotIp($("pico-deploy-ip")?.value || "");
+  const portText = String($("pico-deploy-webrepl-port")?.value || "").trim();
+  const webreplPort = Number.parseInt(portText, 10);
+  const webreplPassword = String($("pico-deploy-password")?.value || "");
+  const { gatewayUrl } = getTerminalConnectionConfig();
+
+  if (!gatewayUrl) {
+    setPicoDeployStatus("Gateway missing", "error");
+    appendPicoDeployOutput("Configure the terminal gateway before sending Pico reset.");
+    return;
+  }
+  if (!picoIp) {
+    setPicoDeployStatus("Invalid Pico IP", "error");
+    appendPicoDeployOutput("Enter a valid Pico hotspot IP.");
+    return;
+  }
+  if (!Number.isInteger(webreplPort) || webreplPort < 1 || webreplPort > 65535) {
+    setPicoDeployStatus("Invalid port", "error");
+    appendPicoDeployOutput("Enter a valid WebREPL TCP port.");
+    return;
+  }
+  if (!webreplPassword) {
+    setPicoDeployStatus("Password required", "error");
+    appendPicoDeployOutput("Enter the Pico WebREPL password before resetting.");
+    return;
+  }
+
+  setPicoDeployStatus(`Resetting ${leg}`, "working");
+  appendPicoDeployOutput(`Reset requested for ${leg} at ${picoIp}:${webreplPort}.`);
+
+  try {
+    await connectServiceGateway(gatewayUrl);
+  } catch (err) {
+    setPicoDeployStatus("Gateway unavailable", "error");
+    appendPicoDeployOutput(err.message || "Failed to connect to terminal gateway.");
+    return;
+  }
+
+  const ws = pickReachableTerminalGatewayWebSocket();
+  if (!ws) {
+    setPicoDeployStatus("Gateway unavailable", "error");
+    appendPicoDeployOutput("No gateway WebSocket is available for Pico reset.");
+    return;
+  }
+
+  ws.send(
+    JSON.stringify({
+      type: "pico_reset",
+      leg,
+      pico_ip: picoIp,
+      webrepl_port: webreplPort,
+      webrepl_password: webreplPassword,
+    })
+  );
+}
+
 /** @returns {boolean} true if this JSON message was handled as a gateway service reply (not SSH output) */
 function handleTerminalGatewayServiceMessage(payload) {
   if (!payload || typeof payload.type !== "string") return false;
@@ -4611,6 +4941,77 @@ function handleTerminalGatewayServiceMessage(payload) {
   if (t === "device_scan_error") {
     logLine("DEV", payload.message || "Device scan failed", "error");
     deviceScanInFlight = false;
+    return true;
+  }
+  if (t === "pico_deploy_started") {
+    const action = String(payload.action || "upload");
+    const host = String(payload.host || "unknown");
+    const actionLabel =
+      action === "reset" ? "Reset" : action === "download" ? "Download" : "Deploy";
+    const actionStatus =
+      action === "reset" ? "Reset in progress" : action === "download" ? "Download in progress" : "Upload in progress";
+    setPicoDeployStatus(actionStatus, "working");
+    appendPicoDeployOutput(`${actionLabel} started for ${host}.`);
+    return true;
+  }
+  if (t === "pico_deploy_progress") {
+    const text = String(payload.message || "").trim();
+    if (text) appendPicoDeployOutput(text);
+    return true;
+  }
+  if (t === "pico_deploy_complete") {
+    const action = String(payload.action || "upload");
+    const host = String(payload.host || "unknown");
+    const actionLabel =
+      action === "reset" ? "Reset" : action === "download" ? "Download" : "Deploy";
+    const actionStatus =
+      action === "reset" ? "Reset complete" : action === "download" ? "Download complete" : "Deploy complete";
+    setPicoDeployStatus(actionStatus, "success");
+    appendPicoDeployOutput(`${actionLabel} finished for ${host}.`);
+    return true;
+  }
+  if (t === "pico_deploy_error") {
+    setPicoDeployStatus("Deploy error", "error");
+    appendPicoDeployOutput(payload.message || "Pico deploy failed.");
+    return true;
+  }
+  if (t === "pico_file_loaded") {
+    const editor = $("pico-deploy-editor");
+    const localPathInput = $("pico-deploy-local-path");
+    if (editor instanceof HTMLTextAreaElement) {
+      editor.value = String(payload.content || "");
+      markPicoDeployEditorDirty(false);
+    }
+    if (localPathInput instanceof HTMLInputElement && payload.local_path) {
+      localPathInput.value = String(payload.local_path);
+    }
+    setPicoDeployStatus("File loaded", "success");
+    appendPicoDeployOutput(`Loaded ${payload.local_path || "local file"} into the editor.`);
+    return true;
+  }
+  if (t === "pico_file_saved") {
+    markPicoDeployEditorDirty(false);
+    setPicoDeployStatus("File saved", "success");
+    appendPicoDeployOutput(
+      `Saved ${payload.local_path || "local file"} (${payload.bytes ?? "?"} bytes).`
+    );
+    return true;
+  }
+  if (t === "pico_file_pulled") {
+    const editor = $("pico-deploy-editor");
+    if (editor instanceof HTMLTextAreaElement) {
+      editor.value = String(payload.content || "");
+      markPicoDeployEditorDirty(false);
+    }
+    setPicoDeployStatus("Pico file loaded", "success");
+    appendPicoDeployOutput(
+      `Loaded ${payload.remote_path || "/main.py"} from ${payload.pico_ip || "Pico"} into the editor.`
+    );
+    return true;
+  }
+  if (t === "pico_file_error") {
+    setPicoDeployStatus("File error", "error");
+    appendPicoDeployOutput(payload.message || "Pico file operation failed.");
     return true;
   }
   if (t === "udp_listener_started") {
@@ -5226,6 +5627,81 @@ function setupTrajectoryPanel() {
   });
 }
 
+function setupPicoDeployPanel() {
+  const legSelect = $("pico-deploy-leg");
+  const ipInput = $("pico-deploy-ip");
+  const portInput = $("pico-deploy-webrepl-port");
+  const pathInput = $("pico-deploy-local-path");
+  const passwordInput = $("pico-deploy-password");
+  const editor = $("pico-deploy-editor");
+  const settingsBtn = $("pico-deploy-settings-toggle-btn");
+  const settingsPanel = $("pico-deploy-settings");
+
+  if (pathInput instanceof HTMLInputElement && !pathInput.value.trim()) {
+    pathInput.value = DEFAULT_PICO_FIRMWARE_PATH;
+  }
+  if (portInput instanceof HTMLInputElement && !portInput.value.trim()) {
+    portInput.value = String(DEFAULT_PICO_WEBREPL_PORT);
+  }
+  if (passwordInput instanceof HTMLInputElement && !passwordInput.value) {
+    passwordInput.value = DEFAULT_PICO_WEBREPL_PASSWORD;
+  }
+
+  if (legSelect instanceof HTMLSelectElement) {
+    if (!CONFIG.legs.includes(legSelect.value)) {
+      legSelect.value = "l0";
+    }
+    legSelect.addEventListener("change", () => syncPicoDeployLegSelection(true));
+  }
+  if (ipInput instanceof HTMLInputElement) {
+    ipInput.addEventListener("focus", () => syncPicoDeployLegSelection(false));
+  }
+  if (editor instanceof HTMLTextAreaElement) {
+    editor.addEventListener("input", () => markPicoDeployEditorDirty(true));
+  }
+  if (settingsBtn && settingsPanel) {
+    const syncSettingsToggleState = () => {
+      const expanded = !settingsPanel.hidden;
+      settingsBtn.setAttribute("aria-expanded", String(expanded));
+      settingsBtn.classList.toggle("is-active", expanded);
+    };
+    syncSettingsToggleState();
+    settingsBtn.addEventListener("pointerdown", (event) => {
+      event.stopPropagation();
+    });
+    settingsBtn.addEventListener("click", () => {
+      settingsPanel.hidden = !settingsPanel.hidden;
+      syncSettingsToggleState();
+    });
+  }
+
+  $("pico-deploy-load-btn")?.addEventListener("click", loadPicoDeployFile);
+  $("pico-deploy-load-pico-btn")?.addEventListener("click", loadPicoDeployFromPico);
+  $("pico-deploy-save-btn")?.addEventListener("click", savePicoDeployFile);
+  $("pico-deploy-upload-btn")?.addEventListener("click", () => requestPicoDeploy());
+  $("pico-deploy-upload-reset-btn")?.addEventListener("click", () =>
+    requestPicoDeploy({ resetAfter: true })
+  );
+  $("pico-deploy-reset-btn")?.addEventListener("click", requestPicoReset);
+  $("pico-deploy-clear-log-btn")?.addEventListener("click", clearPicoDeployOutput);
+  $("pico-open-webrepl-btn")?.addEventListener("click", () => {
+    const picoIp = normalizeHotspotIp($("pico-deploy-ip")?.value || "");
+    const webreplPort = Number.parseInt(String($("pico-deploy-webrepl-port")?.value || "").trim(), 10);
+    if (!picoIp || !Number.isInteger(webreplPort)) {
+      setPicoDeployStatus("Invalid target", "error");
+      appendPicoDeployOutput("Enter a valid Pico IP and WebREPL port before opening WebREPL.");
+      return;
+    }
+    window.open(`http://${picoIp}:${webreplPort}/`, "_blank", "noopener,noreferrer");
+  });
+
+  setPicoDeployStatus("Idle");
+  renderPicoDeployOutput();
+  setPicoDeployEditorStatus("Editor idle");
+  syncPicoDeployLegSelection(true);
+  loadPicoDeployFile();
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   setupRos();
   setupDraggableConsolePanel();
@@ -5239,6 +5715,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   setupTerminalForm();
   setupTrajectoryPanel();
+  setupPicoDeployPanel();
   setupListenPanel();
   installPanelCloseButtons();
   const gyroZeroRollPitchBtn = $("gyro-zero-roll-pitch-btn");
